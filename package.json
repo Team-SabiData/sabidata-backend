@@ -1,0 +1,36 @@
+{
+  "name": "@sabidata/backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test 'src/**/*.test.ts'",
+    "dev": "RUN_SERVER=1 tsx watch --env-file-if-exists=.env src/server.ts",
+    "start": "RUN_SERVER=1 tsx src/server.ts",
+    "bootstrap-admin": "tsx --env-file-if-exists=.env scripts/bootstrap-admin.ts"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^26.0.1",
+    "@types/pg": "^8.20.0",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1085.0",
+    "@electric-sql/pglite": "^0.5.3",
+    "@fastify/cors": "^11.3.1",
+    "@fastify/multipart": "^9.4.0",
+    "@noble/hashes": "^2.2.0",
+    "@vonage/server-sdk": "^3.27.0",
+    "fastify": "^5.8.5",
+    "jsonwebtoken": "^9.0.3",
+    "otpauth": "^9.5.1",
+    "pg": "^8.22.0",
+    "tsx": "^4.22.4",
+    "zod": "^4.4.3"
+  }
+}
