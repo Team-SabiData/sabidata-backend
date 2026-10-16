@@ -22,6 +22,8 @@ import { ProfileReq, isProfileComplete } from './mobile/profileSchema';
 import { langMatches } from './mobile/langMatch';
 import { assertProdSecurity, isProduction } from './config/prodGuard';
 import { buildRegionCoverage } from './mobile/regionCoverage';
+import { type MediaProcessor, StubMediaProcessor, FfmpegMediaProcessor, ffmpegAvailable } from './media/processor';
+import { SEED_PROMPTS } from './db/referentialSeed';
 
 function corsOrigins(): boolean | string[] {
   const raw = process.env.CORS_ORIGINS?.trim();
@@ -31,7 +33,11 @@ function corsOrigins(): boolean | string[] {
 
 // Câblage minimal : séparation /api (mobile) vs /admin (web), garde central.
 // Injecte le Repo (InMemoryRepo par défaut, PgRepo en prod).
-export function buildServer(repo: Repo = new InMemoryRepo(), audioStore: AudioStore = new FsAudioStore(CONFIG.audioDir)) {
+export function buildServer(
+  repo: Repo = new InMemoryRepo(),
+  audioStore: AudioStore = new FsAudioStore(CONFIG.audioDir),
+  media: MediaProcessor = new StubMediaProcessor(),
+) {
   const app = Fastify({ logger: false });
   app.register(cors, {
     origin: corsOrigins(),
@@ -47,32 +53,15 @@ export function buildServer(repo: Repo = new InMemoryRepo(), audioStore: AudioSt
   app.register((i) => adminAuthRoutes(i, repo), { prefix: '/admin/auth' });
 
   // Surface MOBILE protégée : /me + portefeuille + flux de contribution.
-  const contributions = new ContributionService(repo, audioStore);
+  const contributions = new ContributionService(repo, audioStore, media);
   const wallet = new WalletService(repo);
 
-  // Catalogue de phrases à enregistrer (sera remplacé par une table DB en v2).
-  const PROMPTS = [
-    { id: 'p01', text: 'Le marché se tient chaque dimanche matin.', lang: 'moore', dialect: 'Nord' },
-    { id: 'p02', text: 'La pluie est arrivée tôt cette année.', lang: 'moore', dialect: 'Centre' },
-    { id: 'p03', text: 'Mon père cultive le mil et le sorgho.', lang: 'dioula', dialect: 'Ouest' },
-    { id: 'p04', text: 'Les enfants jouent près du baobab.', lang: 'moore', dialect: 'Plateau-Central' },
-    { id: 'p05', text: 'L\'eau du puits est fraîche en saison sèche.', lang: 'fulfulde', dialect: 'Sahel' },
-    { id: 'p06', text: 'La vieille femme tisse le faso dan fani.', lang: 'dioula', dialect: 'Hauts-Bassins' },
-    { id: 'p07', text: 'Le chef du village convoque une réunion ce soir.', lang: 'moore', dialect: 'Nord' },
-    { id: 'p08', text: 'Nous partons à Ouaga demain à l\'aube.', lang: 'moore', dialect: 'Centre' },
-    { id: 'p09', text: 'La radio diffuse les nouvelles en trois langues.', lang: 'dioula', dialect: 'Ouest' },
-    { id: 'p10', text: 'Le bœuf et l\'âne travaillent dans les champs.', lang: 'fulfulde', dialect: 'Est' },
-    { id: 'p11', text: 'Ma grand-mère connaît beaucoup de proverbes.', lang: 'moore', dialect: 'Centre-Nord' },
-    { id: 'p12', text: 'Le téléphone portable est utile pour appeler la famille.', lang: 'dioula', dialect: 'Cascade' },
-    { id: 'p13', text: 'Les mangues sont mûres en saison chaude.', lang: 'moore', dialect: 'Centre-Ouest' },
-    { id: 'p14', text: 'Le forgeron fabrique des outils pour les paysans.', lang: 'fulfulde', dialect: 'Nord' },
-    { id: 'p15', text: 'La mosquée et l\'église sont au centre du village.', lang: 'moore', dialect: 'Centre-Sud' },
-    { id: 'p16', text: 'Sɔgɔma nin na, sigiɖa bɛ se ka kɛ jɔ.', lang: 'dioula', dialect: 'Hauts-Bassins' },
-    { id: 'p17', text: 'Ned yaa yãgd tõog ne pʋg-pɛlg.', lang: 'moore', dialect: 'Plateau-Central' },
-    { id: 'p18', text: 'Himo Alla, ko nde wii nannditii.', lang: 'fulfulde', dialect: 'Sahel' },
-    { id: 'p19', text: 'Les femmes récoltent le karité à l\'aube.', lang: 'moore', dialect: 'Boucle-du-Mouhoun' },
-    { id: 'p20', text: 'Le griot raconte l\'histoire du royaume.', lang: 'dioula', dialect: 'Centre' },
-  ];
+  const fallbackPrompts = SEED_PROMPTS.map((p) => ({
+    id: p.id,
+    text: p.text,
+    lang: p.languageCode,
+    dialect: p.dialectCode,
+  }));
 
   app.register(
     async (i) => {
@@ -127,16 +116,29 @@ export function buildServer(repo: Repo = new InMemoryRepo(), audioStore: AudioSt
       // Historique perso des gains — antéchronologique.
       i.get('/me/ledger', async (req) => ({ entries: await repo.ledgerHistoryFor(req.principal!.userId) }));
 
-      // Phrase suivante — filtrée par langue si ?lang= fourni
+      // Phrase suivante — DB référentiel, fallback seed
       i.get('/prompts/next', async (req) => {
         const query = (req.query as Record<string, string>);
         const langParam = (query.lang ?? '').trim();
-
+        let dbPrompts = await repo.listActivePrompts();
+        if (langParam) {
+          dbPrompts = dbPrompts.filter((p) => langMatches(p.languageCode, langParam));
+        }
+        if (dbPrompts.length > 0) {
+          const p = dbPrompts[Math.floor(Math.random() * dbPrompts.length)]!;
+          return {
+            prompt: {
+              id: p.stableId,
+              text: p.text,
+              lang: p.languageCode,
+              dialect: p.dialectCode,
+            },
+          };
+        }
         const pool = langParam
-          ? PROMPTS.filter((p) => langMatches(p.lang, langParam))
-          : PROMPTS;
-
-        const source = pool.length > 0 ? pool : PROMPTS;
+          ? fallbackPrompts.filter((p) => langMatches(p.lang, langParam))
+          : fallbackPrompts;
+        const source = pool.length > 0 ? pool : fallbackPrompts;
         const prompt = source[Math.floor(Math.random() * source.length)];
         return { prompt };
       });
@@ -172,11 +174,25 @@ export function buildServer(repo: Repo = new InMemoryRepo(), audioStore: AudioSt
     { prefix: '/api' },
   );
 
-  // Couverture régionale — public (aucune PII, agrégats par région) : carte des
-  // dialectes accessible sans compte depuis l'écran de sélection.
+  // Référentiel + couverture — public (aucune PII).
   app.register(
     async (i) => {
       i.get('/regions', async () => buildRegionCoverage(await repo.countClipsByRegion()));
+      i.get('/languages', async () => {
+        const languages = await repo.listLanguages();
+        if (languages.length > 0) return { languages };
+        return {
+          languages: [
+            { code: 'moore', nameFr: 'Mooré', isoBcp47: 'mos' },
+            { code: 'dioula', nameFr: 'Dioula', isoBcp47: 'dyu' },
+            { code: 'fulfulde', nameFr: 'Fulfuldé', isoBcp47: 'fuv' },
+          ],
+        };
+      });
+      i.get('/dialects', async (req) => {
+        const lang = ((req.query as Record<string, string>).lang ?? '').trim() || undefined;
+        return { dialects: await repo.listDialects(lang) };
+      });
     },
     { prefix: '/api' },
   );
@@ -424,7 +440,14 @@ if (process.env.RUN_SERVER === '1') {
     if (!isProduction()) {
       await seedDevAdmin(repo);
     }
-    const app = buildServer(repo, audioStore);
+    let media: MediaProcessor = new StubMediaProcessor();
+    if (await ffmpegAvailable()) {
+      media = new FfmpegMediaProcessor();
+      console.log('media: ffmpeg');
+    } else {
+      console.warn('media: stub (ffmpeg absent — qualité dataset dégradée)');
+    }
+    const app = buildServer(repo, audioStore, media);
     // Railway injecte PORT ; défaut 3000 en local. host 0.0.0.0 → LAN + containers.
     const port = Number(process.env.PORT) || 3000;
     await app.listen({ port, host: '0.0.0.0' });

@@ -36,8 +36,44 @@ export interface Clip {
   status: ClipState;
   consent: Consent;
   autocheck?: Record<string, unknown>;
-  audioPath?: string; // chemin relatif du blob audio (null tant que non stocké)
+  audioPath?: string; // chemin lecture (master préféré, sinon ingest)
+  audioIngestPath?: string;
+  audioMasterPath?: string;
+  ingestSha256?: string;
+  masterSha256?: string;
+  durationMs?: number;
+  silenceRatio?: number;
+  snrDb?: number;
+  peakDbfs?: number;
+  audioQuality?: 'A' | 'B' | 'C' | 'F';
   createdAt: Date;
+}
+
+export interface LanguageRow {
+  id: string;
+  code: string;
+  nameFr: string;
+  isoBcp47: string;
+  status: string;
+}
+
+export interface DialectRow {
+  id: string;
+  languageId: string;
+  languageCode: string;
+  code: string;
+  nameFr: string;
+  zone?: string;
+  targetHours: number;
+}
+
+export interface PromptRow {
+  id: string;
+  stableId: string;
+  languageCode: string;
+  dialectCode?: string;
+  text: string;
+  writingSystem: string;
 }
 
 // Groupe de collecte (école, association) rejoint par code d'invitation.

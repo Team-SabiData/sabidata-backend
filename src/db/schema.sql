@@ -50,6 +50,35 @@ CREATE TABLE otp_codes (
   expires_at timestamptz NOT NULL
 );
 
+-- Référentiel linguistique (dataset quality)
+CREATE TABLE languages (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  code       text NOT NULL UNIQUE,
+  name_fr    text NOT NULL,
+  iso_bcp47  text NOT NULL,
+  status     text NOT NULL DEFAULT 'active'
+);
+
+CREATE TABLE dialects (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  language_id   uuid NOT NULL REFERENCES languages(id),
+  code          text NOT NULL,
+  name_fr       text NOT NULL,
+  zone          text,
+  target_hours  numeric NOT NULL DEFAULT 0,
+  UNIQUE (language_id, code)
+);
+
+CREATE TABLE prompts (
+  id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  stable_id      text NOT NULL UNIQUE,
+  language_id    uuid NOT NULL REFERENCES languages(id),
+  dialect_id     uuid REFERENCES dialects(id),
+  text           text NOT NULL,
+  writing_system text NOT NULL DEFAULT 'std',
+  active         boolean NOT NULL DEFAULT true
+);
+
 CREATE TABLE clips (
   id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   contributor_id      uuid NOT NULL REFERENCES users(id),
@@ -71,6 +100,15 @@ CREATE TABLE clips (
   provenance          jsonb,
   autocheck           jsonb,
   audio_path          text,
+  audio_ingest_path   text,
+  audio_master_path   text,
+  ingest_sha256       text,
+  master_sha256       text,
+  duration_ms         integer,
+  silence_ratio       numeric,
+  snr_db              numeric,
+  peak_dbfs           numeric,
+  audio_quality       text, -- A|B|C|F
   created_at          timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_clips_status ON clips(status);

@@ -184,8 +184,11 @@ test('flux — clip valide stocke l\'audio et renseigne audioPath', async () => 
     { buffer: Buffer.alloc(1200, 1), ext: 'm4a' },
   );
   const clip = await repo.getClip(clipId);
-  assert.equal(clip?.audioPath, `${clipId}.m4a`);
+  assert.equal(clip?.audioPath, `${clipId}_master.wav`);
+  assert.equal(clip?.audioIngestPath, `${clipId}.m4a`);
+  assert.equal(clip?.audioQuality, 'A');
   assert.notEqual(await store.openRead(`${clipId}.m4a`), null);
+  assert.notEqual(await store.openRead(`${clipId}_master.wav`), null);
 });
 
 test('flux — clip rejeté (0s) ne stocke AUCUN audio', async () => {

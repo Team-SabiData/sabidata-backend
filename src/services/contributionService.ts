@@ -5,17 +5,13 @@ import { computeTier, type WritingSystem } from '../curation/tier';
 import { type Repo } from '../ports/repo';
 import { type Clip, type Consent, type Rarity, type Verdict } from '../domain/contribution';
 import { type AudioStore, InMemoryAudioStore } from '../storage/audioStore';
+import { type MediaProcessor, StubMediaProcessor } from '../media/processor';
 import { conflict, notFound } from '../errors';
 
 function requiredCompetenceFor(rarity: Rarity): number {
-  // Compétence requise = rareté : clip normal (0) validable par tout contributeur,
-  // rare (1) et très rare (2) réservés aux validateurs plus qualifiés.
   return rarity;
 }
 
-// Isolation linguistique : un contributeur ne manipule que le contenu de SA
-// langue (et de son dialecte si les deux sont renseignés). Souple pour les
-// données héritées : un clip sans langue n'impose aucune contrainte.
 function sameLinguistic(
   user: { language?: string; dialect?: string },
   clip: { language?: string; dialect?: string },
@@ -26,19 +22,30 @@ function sameLinguistic(
   return true;
 }
 
-// Flux de contribution complet, branché sur la logique déjà testée.
 export class ContributionService {
   constructor(
     private readonly repo: Repo,
     private readonly audioStore: AudioStore = new InMemoryAudioStore(),
+    private readonly media: MediaProcessor = new StubMediaProcessor(),
   ) {}
 
-  // GET /clips/:id/audio — lecture d'un clip (garde le repo privé).
   getClip(id: string): Promise<Clip | null> {
     return this.repo.getClip(id);
   }
 
-  // POST /clips — enregistrement → auto-check → peer_review | rejected (+ ledger D4)
+  /** ACL lecture audio — anti-scraping corpus. */
+  async canReadAudio(p: Principal, clip: Clip): Promise<boolean> {
+    if (can(p, 'content.read_any')) return true;
+    if (clip.contributorId === p.userId) return true;
+    const me = (await this.repo.findUserById(p.userId)) ?? {};
+    if (!sameLinguistic(me, clip)) return false;
+    if (clip.status === 'peer_review' && can(p, 'validate') && canHandleContent(p, clip.requiredCompetence)) {
+      return true;
+    }
+    if (clip.status === 'validated') return true;
+    return false;
+  }
+
   async submitClip(
     contributorId: string,
     input: {
@@ -54,9 +61,8 @@ export class ContributionService {
       clientUuid?: string;
     },
     audio?: { buffer: Buffer; ext: string },
-  ): Promise<{ clipId: string; status: ClipState; reward: number; licenseTag: string }> {
+  ): Promise<{ clipId: string; status: ClipState; reward: number; licenseTag: string; audioQuality?: string }> {
     const contributor = await this.repo.findUserById(contributorId);
-    // Idempotence : même clientUuid → même clip (pas de double crédit).
     if (input.clientUuid) {
       const existing = await this.repo.findClipByClientUuid(contributorId, input.clientUuid);
       if (existing) {
@@ -65,17 +71,46 @@ export class ContributionService {
           status: existing.status,
           reward: 0,
           licenseTag: existing.consent.licenseTag,
+          audioQuality: existing.audioQuality,
         };
       }
     }
 
-    // Anti empty-audio : buffer trop petit = rejet (durée client ne suffit pas).
     const minBytes = 800;
     const audioOk = !audio || audio.buffer.length >= minBytes;
-    const { passed: durationOk, report } = autocheck(input.durationS);
-    const passed = durationOk && audioOk;
-    const status: ClipState = passed ? 'peer_review' : 'rejected';
-    const licenseTag = input.commercialUse ? `commercial-${input.consentVersion}` : `noncommercial-${input.consentVersion}`;
+
+    let status: ClipState;
+    let durationS = input.durationS;
+    let autocheckReport: Record<string, unknown>;
+    let mediaResult: Awaited<ReturnType<MediaProcessor['process']>> | null = null;
+
+    if (audio && audioOk) {
+      mediaResult = await this.media.process(audio.buffer, audio.ext);
+      durationS = Math.max(1, Math.round(mediaResult.metrics.durationMs / 1000));
+      status = mediaResult.passed ? 'peer_review' : 'rejected';
+      autocheckReport = {
+        source: 'media_job',
+        durationMs: mediaResult.metrics.durationMs,
+        silenceRatio: mediaResult.metrics.silenceRatio,
+        snrDb: mediaResult.metrics.snrDb,
+        peakDbfs: mediaResult.metrics.peakDbfs,
+        sampleRateHz: mediaResult.metrics.sampleRateHz,
+        channels: mediaResult.metrics.channels,
+        quality: mediaResult.quality,
+        reasons: mediaResult.reasons,
+        audioBytes: audio.buffer.length,
+        audioOk: true,
+      };
+    } else {
+      const { passed: durationOk, report } = autocheck(input.durationS);
+      const passed = durationOk && audioOk;
+      status = passed ? 'peer_review' : 'rejected';
+      autocheckReport = { ...report, audioBytes: audio?.buffer.length ?? 0, audioOk, source: 'client_duration' };
+    }
+
+    const licenseTag = input.commercialUse
+      ? `commercial-${input.consentVersion}`
+      : `noncommercial-${input.consentVersion}`;
     const consent: Consent = {
       commercialUse: input.commercialUse,
       consentVersion: input.consentVersion,
@@ -83,18 +118,16 @@ export class ContributionService {
       provenance: { capturedAt: new Date().toISOString(), device: 'mobile', source: 'sabidata-app' },
     };
 
-    // Langue / région : profil serveur prioritaire (anti spoof client).
     const language = contributor?.language ?? input.language;
     const dialect = contributor?.dialect ?? input.dialect;
     const region = contributor?.region ?? input.region;
 
-    // Rareté dérivée de la couverture régionale — jamais du body client.
     const rarity = await this.serverRarity(region);
     const clip = await this.repo.createClip({
       contributorId,
       promptId: input.promptId,
       rarity,
-      durationS: input.durationS,
+      durationS,
       requiredCompetence: requiredCompetenceFor(rarity),
       language,
       dialect,
@@ -103,16 +136,36 @@ export class ContributionService {
       clientUuid: input.clientUuid,
       status,
       consent,
-      autocheck: { ...report, audioBytes: audio?.buffer.length ?? 0, audioOk },
+      autocheck: autocheckReport,
+      audioQuality: mediaResult?.quality,
+      durationMs: mediaResult?.metrics.durationMs,
     });
 
-    if (passed && audio) {
+    if (audio && audioOk && mediaResult) {
+      const ingestPath = await this.audioStore.save(clip.id, audio.buffer, audio.ext);
+      const masterPath = await this.audioStore.save(`${clip.id}_master`, mediaResult.masterWav, 'wav');
+      await this.repo.setClipMedia(clip.id, {
+        audioPath: masterPath,
+        audioIngestPath: ingestPath,
+        audioMasterPath: masterPath,
+        ingestSha256: mediaResult.ingestSha256,
+        masterSha256: mediaResult.masterSha256,
+        durationS,
+        durationMs: mediaResult.metrics.durationMs,
+        silenceRatio: mediaResult.metrics.silenceRatio,
+        snrDb: mediaResult.metrics.snrDb,
+        peakDbfs: mediaResult.metrics.peakDbfs,
+        audioQuality: mediaResult.quality,
+        autocheck: autocheckReport,
+        status,
+      });
+    } else if (audio && audioOk) {
       const path = await this.audioStore.save(clip.id, audio.buffer, audio.ext);
       await this.repo.setClipAudio(clip.id, path);
     }
 
     let reward = 0;
-    if (passed) {
+    if (status === 'peer_review') {
       reward = CONFIG.rewards.record * (CONFIG.rarityMult[rarity] ?? 1);
       await this.repo.addLedger({
         userId: contributorId,
@@ -122,7 +175,13 @@ export class ContributionService {
         refClipId: clip.id,
       });
     }
-    return { clipId: clip.id, status, reward, licenseTag };
+    return {
+      clipId: clip.id,
+      status,
+      reward,
+      licenseTag,
+      audioQuality: mediaResult?.quality,
+    };
   }
 
   private async serverRarity(region?: string): Promise<Rarity> {
@@ -135,22 +194,20 @@ export class ContributionService {
     return 0;
   }
 
-  // GET /validation/next — routé par competence_level (décision 1/2)
   async nextForValidation(p: Principal): Promise<Clip | null> {
     if (!can(p, 'validate')) throw new ForbiddenError('validate');
     const me = (await this.repo.findUserById(p.userId)) ?? {};
     const candidates = await this.repo.listPeerReview();
     for (const c of candidates) {
-      if (c.contributorId === p.userId) continue; // pas son propre clip
-      if (c.requiredCompetence > p.competence) continue; // niveau insuffisant
-      if (!sameLinguistic(me, c)) continue; // même langue/dialecte uniquement
-      if (await this.repo.hasVotedClip(c.id, p.userId)) continue; // déjà voté
+      if (c.contributorId === p.userId) continue;
+      if (c.requiredCompetence > p.competence) continue;
+      if (!sameLinguistic(me, c)) continue;
+      if (await this.repo.hasVotedClip(c.id, p.userId)) continue;
       return c;
     }
     return null;
   }
 
-  // POST /clips/:id/validations — vote → consensus → transition + ledger
   async submitVote(
     p: Principal,
     clipId: string,
@@ -162,11 +219,10 @@ export class ContributionService {
     if (!canHandleContent(p, clip.requiredCompetence)) throw new ForbiddenError('validate');
     if (clip.contributorId === p.userId) throw conflict('own_clip');
     const me = (await this.repo.findUserById(p.userId)) ?? {};
-    if (!sameLinguistic(me, clip)) throw conflict('wrong_language'); // isolation linguistique
+    if (!sameLinguistic(me, clip)) throw conflict('wrong_language');
     if (await this.repo.hasVotedClip(clipId, p.userId)) throw conflict('already_voted');
 
     await this.repo.createVote({ clipId, validatorId: p.userId, verdict, reviewerCompetence: p.competence });
-    // D4 : valider EST une contribution → crédit confirmé immédiat.
     await this.repo.addLedger({
       userId: p.userId,
       delta: CONFIG.rewards.validate,
@@ -190,16 +246,13 @@ export class ContributionService {
     return { status: next, reward: CONFIG.rewards.validate };
   }
 
-  // POST /transcriptions — produit une transcription (RTB ou conversion)
-  // GET /transcriptions/next — clip validé à transcrire, filtré par langue/dialecte
-  // du contributeur (même isolation que la validation).
   async nextForTranscription(p: Principal): Promise<Clip | null> {
     const me = (await this.repo.findUserById(p.userId)) ?? {};
     const candidates = await this.repo.listClipsByStatus('validated');
     for (const c of candidates) {
-      if (c.contributorId === p.userId) continue; // pas son propre clip
-      if (!sameLinguistic(me, c)) continue; // même langue/dialecte uniquement
-      if (await this.repo.hasTranscribedClip(c.id, p.userId)) continue; // déjà transcrit
+      if (c.contributorId === p.userId) continue;
+      if (!sameLinguistic(me, c)) continue;
+      if (await this.repo.hasTranscribedClip(c.id, p.userId)) continue;
       return c;
     }
     return null;
@@ -219,7 +272,6 @@ export class ContributionService {
       if (!sameLinguistic(me, clip)) throw conflict('wrong_language');
       if (await this.repo.hasTranscribedClip(input.clipId, p.userId)) throw conflict('already_transcribed');
     }
-    // consistency client non trusted pour le reward — fixée côté serveur à 0.6
     const consistency = 0.6;
     const tr = await this.repo.createTranscription({
       authorId: p.userId,
@@ -230,11 +282,16 @@ export class ContributionService {
       consistency,
     });
     const reward = CONFIG.rewards.transcribe;
-    await this.repo.addLedger({ userId: p.userId, delta: reward, reason: 'transcribe', state: 'confirmed', refTranscriptionId: tr.id });
+    await this.repo.addLedger({
+      userId: p.userId,
+      delta: reward,
+      reason: 'transcribe',
+      state: 'confirmed',
+      refTranscriptionId: tr.id,
+    });
     return { id: tr.id, reward };
   }
 
-  // POST /transcriptions/:id/validations — vote → calcul du tier (D1)
   async voteTranscription(
     p: Principal,
     transcriptionId: string,
@@ -242,7 +299,12 @@ export class ContributionService {
     input: { writingSystem: WritingSystem; consistency: number },
   ): Promise<{ tier: string; matchesAudio: boolean | null }> {
     if (!can(p, 'validate')) throw new ForbiddenError('validate');
-    await this.repo.createVote({ transcriptionId, validatorId: p.userId, verdict, reviewerCompetence: p.competence });
+    await this.repo.createVote({
+      transcriptionId,
+      validatorId: p.userId,
+      verdict,
+      reviewerCompetence: p.competence,
+    });
     const votes = await this.repo.votesForTranscription(transcriptionId);
     const result = computeTier({
       writingSystem: input.writingSystem,

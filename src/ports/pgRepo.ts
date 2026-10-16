@@ -14,6 +14,9 @@ import {
   type AuditEntry,
   type Withdrawal,
   type Classroom,
+  type LanguageRow,
+  type DialectRow,
+  type PromptRow,
 } from '../domain/contribution';
 import { type Repo, type UserRecord, type UserStatus } from './repo';
 
@@ -102,6 +105,49 @@ export class PgRepo implements Repo {
   async setClipAudio(id: string, audioPath: string) {
     await this.db.query('UPDATE clips SET audio_path = $2 WHERE id = $1', [id, audioPath]);
   }
+  async setClipMedia(
+    id: string,
+    media: {
+      audioPath: string;
+      audioIngestPath: string;
+      audioMasterPath: string;
+      ingestSha256: string;
+      masterSha256: string;
+      durationS: number;
+      durationMs: number;
+      silenceRatio: number;
+      snrDb: number | null;
+      peakDbfs: number | null;
+      audioQuality: 'A' | 'B' | 'C' | 'F';
+      autocheck: Record<string, unknown>;
+      status: ClipState;
+    },
+  ) {
+    await this.db.query(
+      `UPDATE clips SET
+         audio_path = $2, audio_ingest_path = $3, audio_master_path = $4,
+         ingest_sha256 = $5, master_sha256 = $6,
+         duration_s = $7, duration_ms = $8, silence_ratio = $9, snr_db = $10, peak_dbfs = $11,
+         audio_quality = $12, autocheck = $13, status = $14
+       WHERE id = $1`,
+      [
+        id,
+        media.audioPath,
+        media.audioIngestPath,
+        media.audioMasterPath,
+        media.ingestSha256,
+        media.masterSha256,
+        media.durationS,
+        media.durationMs,
+        media.silenceRatio,
+        media.snrDb,
+        media.peakDbfs,
+        media.audioQuality,
+        JSON.stringify(media.autocheck),
+        media.status,
+      ],
+    );
+  }
   async listPeerReview() {
     return (await this.many<ClipRow>(`SELECT * FROM clips WHERE status = 'peer_review' ORDER BY created_at`)).map(
       (r) => this.mapClip(r)!,
@@ -112,6 +158,56 @@ export class PgRepo implements Repo {
       `SELECT region, COUNT(*)::text AS n FROM clips WHERE region IS NOT NULL GROUP BY region`,
     );
     return rows.map((r) => ({ region: r.region as string, clips: Number(r.n) }));
+  }
+  async listLanguages(): Promise<LanguageRow[]> {
+    const rows = await this.many<{ id: string; code: string; name_fr: string; iso_bcp47: string; status: string }>(
+      `SELECT id, code, name_fr, iso_bcp47, status FROM languages WHERE status = 'active' ORDER BY name_fr`,
+    );
+    return rows.map((r) => ({
+      id: r.id, code: r.code, nameFr: r.name_fr, isoBcp47: r.iso_bcp47, status: r.status,
+    }));
+  }
+  async listDialects(languageCode?: string): Promise<DialectRow[]> {
+    const rows = await this.many<{
+      id: string; language_id: string; language_code: string; code: string;
+      name_fr: string; zone: string | null; target_hours: string;
+    }>(
+      `SELECT d.id, d.language_id, l.code AS language_code, d.code, d.name_fr, d.zone, d.target_hours::text
+       FROM dialects d JOIN languages l ON l.id = d.language_id
+       WHERE ($1::text IS NULL OR l.code = $1)
+       ORDER BY d.name_fr`,
+      [languageCode ?? null],
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      languageId: r.language_id,
+      languageCode: r.language_code,
+      code: r.code,
+      nameFr: r.name_fr,
+      zone: r.zone ?? undefined,
+      targetHours: Number(r.target_hours),
+    }));
+  }
+  async listActivePrompts(languageCode?: string): Promise<PromptRow[]> {
+    const rows = await this.many<{
+      id: string; stable_id: string; language_code: string; dialect_code: string | null;
+      text: string; writing_system: string;
+    }>(
+      `SELECT p.id, p.stable_id, l.code AS language_code, d.code AS dialect_code, p.text, p.writing_system
+       FROM prompts p
+       JOIN languages l ON l.id = p.language_id
+       LEFT JOIN dialects d ON d.id = p.dialect_id
+       WHERE p.active = true AND ($1::text IS NULL OR l.code = $1)`,
+      [languageCode ?? null],
+    );
+    return rows.map((r) => ({
+      id: r.id,
+      stableId: r.stable_id,
+      languageCode: r.language_code,
+      dialectCode: r.dialect_code ?? undefined,
+      text: r.text,
+      writingSystem: r.writing_system,
+    }));
   }
 
   // — votes —
@@ -343,6 +439,15 @@ export class PgRepo implements Repo {
       clientUuid: r.client_uuid ?? undefined,
       status: r.status as ClipState, consent, autocheck: r.autocheck ?? undefined,
       audioPath: r.audio_path ?? undefined,
+      audioIngestPath: r.audio_ingest_path ?? undefined,
+      audioMasterPath: r.audio_master_path ?? undefined,
+      ingestSha256: r.ingest_sha256 ?? undefined,
+      masterSha256: r.master_sha256 ?? undefined,
+      durationMs: r.duration_ms ?? undefined,
+      silenceRatio: r.silence_ratio != null ? Number(r.silence_ratio) : undefined,
+      snrDb: r.snr_db != null ? Number(r.snr_db) : undefined,
+      peakDbfs: r.peak_dbfs != null ? Number(r.peak_dbfs) : undefined,
+      audioQuality: (r.audio_quality as Clip['audioQuality']) ?? undefined,
       createdAt: new Date(r.created_at),
     };
   }
@@ -405,6 +510,15 @@ interface ClipRow {
   status: string; commercial_use: boolean; consent_version: string;
   license_tag: string; provenance: Record<string, unknown> | null; autocheck: Record<string, unknown> | null;
   audio_path: string | null;
+  audio_ingest_path: string | null;
+  audio_master_path: string | null;
+  ingest_sha256: string | null;
+  master_sha256: string | null;
+  duration_ms: number | null;
+  silence_ratio: string | null;
+  snr_db: string | null;
+  peak_dbfs: string | null;
+  audio_quality: string | null;
   created_at: string;
 }
 interface ClassroomRow {

@@ -10,6 +10,9 @@ import {
   type AuditEntry,
   type Withdrawal,
   type Classroom,
+  type LanguageRow,
+  type DialectRow,
+  type PromptRow,
 } from '../domain/contribution';
 
 export type UserStatus = 'active' | 'suspended' | 'banned' | 'deleted';
@@ -49,8 +52,31 @@ export interface Repo {
   getClip(id: string): Promise<Clip | null>;
   setClipStatus(id: string, status: ClipState, autocheck?: Record<string, unknown>): Promise<void>;
   setClipAudio(id: string, audioPath: string): Promise<void>;
+  setClipMedia(
+    id: string,
+    media: {
+      audioPath: string;
+      audioIngestPath: string;
+      audioMasterPath: string;
+      ingestSha256: string;
+      masterSha256: string;
+      durationS: number;
+      durationMs: number;
+      silenceRatio: number;
+      snrDb: number | null;
+      peakDbfs: number | null;
+      audioQuality: 'A' | 'B' | 'C' | 'F';
+      autocheck: Record<string, unknown>;
+      status: ClipState;
+    },
+  ): Promise<void>;
   listPeerReview(): Promise<Clip[]>;
   countClipsByRegion(): Promise<Array<{ region: string; clips: number }>>;
+
+  // — référentiel —
+  listLanguages(): Promise<LanguageRow[]>;
+  listDialects(languageCode?: string): Promise<DialectRow[]>;
+  listActivePrompts(languageCode?: string): Promise<PromptRow[]>;
 
   createVote(v: Omit<Vote, 'id' | 'createdAt'>): Promise<Vote>;
   hasVotedClip(clipId: string, validatorId: string): Promise<boolean>;
@@ -120,6 +146,9 @@ export class InMemoryRepo implements Repo {
   private audit: AuditEntry[] = [];
   private withdrawals: Withdrawal[] = [];
   private classrooms: Classroom[] = [];
+  private languages: LanguageRow[] = [];
+  private dialects: DialectRow[] = [];
+  private prompts: PromptRow[] = [];
   private seq = 0;
   private id(p: string): string {
     return `${p}_${++this.seq}`;
@@ -173,8 +202,59 @@ export class InMemoryRepo implements Repo {
     const c = this.clips.find((x) => x.id === id);
     if (c) c.audioPath = audioPath;
   }
+  async setClipMedia(
+    id: string,
+    media: {
+      audioPath: string;
+      audioIngestPath: string;
+      audioMasterPath: string;
+      ingestSha256: string;
+      masterSha256: string;
+      durationS: number;
+      durationMs: number;
+      silenceRatio: number;
+      snrDb: number | null;
+      peakDbfs: number | null;
+      audioQuality: 'A' | 'B' | 'C' | 'F';
+      autocheck: Record<string, unknown>;
+      status: ClipState;
+    },
+  ) {
+    const c = this.clips.find((x) => x.id === id);
+    if (!c) return;
+    Object.assign(c, {
+      audioPath: media.audioPath,
+      audioIngestPath: media.audioIngestPath,
+      audioMasterPath: media.audioMasterPath,
+      ingestSha256: media.ingestSha256,
+      masterSha256: media.masterSha256,
+      durationS: media.durationS,
+      durationMs: media.durationMs,
+      silenceRatio: media.silenceRatio,
+      snrDb: media.snrDb ?? undefined,
+      peakDbfs: media.peakDbfs ?? undefined,
+      audioQuality: media.audioQuality,
+      autocheck: media.autocheck,
+      status: media.status,
+    });
+  }
   async listPeerReview() {
     return this.clips.filter((c) => c.status === 'peer_review');
+  }
+  async listLanguages() {
+    return [...this.languages];
+  }
+  async listDialects(languageCode?: string) {
+    return this.dialects.filter((d) => (languageCode ? d.languageCode === languageCode : true));
+  }
+  async listActivePrompts(languageCode?: string) {
+    return this.prompts.filter((p) => (languageCode ? p.languageCode === languageCode : true));
+  }
+  /** Seed mémoire pour tests (optionnel). */
+  seedReferential(data: { languages: LanguageRow[]; dialects: DialectRow[]; prompts: PromptRow[] }) {
+    this.languages = data.languages;
+    this.dialects = data.dialects;
+    this.prompts = data.prompts;
   }
   async countClipsByRegion() {
     const byRegion = new Map<string, number>();

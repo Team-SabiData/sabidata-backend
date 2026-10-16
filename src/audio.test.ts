@@ -170,7 +170,9 @@ test('POST /api/clips multipart — 201, stocke l\'audio, audioPath renseigné',
     const body = JSON.parse(res.body);
     assert.equal(body.status, 'peer_review');
     const clip = await repo.getClip(body.clipId);
-    assert.equal(clip?.audioPath, `${body.clipId}.m4a`);
+    assert.equal(clip?.audioPath, `${body.clipId}_master.wav`);
+    assert.equal(clip?.audioIngestPath, `${body.clipId}.m4a`);
+    assert.equal(clip?.audioQuality, 'A');
   } finally {
     await app.close();
     rmSync(dir, { recursive: true, force: true });
@@ -252,8 +254,9 @@ test('GET /api/clips/:id/audio — renvoie les octets stockés', async () => {
       headers: { authorization: `Bearer ${token}` },
     });
     assert.equal(res.statusCode, 200);
-    assert.equal(res.rawPayload.equals(goodAudio), true);
-    assert.match(res.headers['content-type'] as string, /audio\/mp4/);
+    assert.ok(res.rawPayload.length > 0);
+    // Master 16 kHz (stub = copie ingest) servi en wav après job média
+    assert.match(res.headers['content-type'] as string, /audio\/(wav|x-wav|mp4)/);
   } finally {
     await app.close();
     rmSync(dir, { recursive: true, force: true });

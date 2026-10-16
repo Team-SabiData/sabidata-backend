@@ -77,9 +77,13 @@ export async function contributionRoutes(
     const { id } = req.params as { id: string };
     const clip = await svc.getClip(id);
     if (!clip || !clip.audioPath) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'audio' } });
-    const stream = await audioStore.openRead(clip.audioPath);
+    if (!(await svc.canReadAudio(p, clip))) {
+      return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'audio_acl' } });
+    }
+    const path = clip.audioMasterPath ?? clip.audioPath;
+    const stream = await audioStore.openRead(path);
     if (!stream) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'audio' } });
-    const ext = clip.audioPath.split('.').pop() ?? '';
+    const ext = path.split('.').pop() ?? '';
     return reply.type(mimeFromExt(ext)).send(stream);
   });
 
