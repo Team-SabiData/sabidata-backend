@@ -17,6 +17,8 @@ import {
   type LanguageRow,
   type DialectRow,
   type PromptRow,
+  type DatasetRelease,
+  type DatasetItem,
 } from '../domain/contribution';
 import { type Repo, type UserRecord, type UserStatus } from './repo';
 
@@ -305,6 +307,85 @@ export class PgRepo implements Repo {
     await this.db.query(`UPDATE prompts SET active = $2 WHERE stable_id = $1`, [stableId, active]);
     return this.getPromptByStableId(stableId);
   }
+  async listTranscriptionsForClip(clipId: string): Promise<Transcription[]> {
+    return (await this.many<TrRow>('SELECT * FROM transcriptions WHERE clip_id = $1', [clipId])).map(
+      (r) => this.mapTr(r)!,
+    );
+  }
+  async createDatasetRelease(r: Omit<DatasetRelease, 'id' | 'createdAt' | 'publishedAt' | 'manifestJsonl' | 'stats'> & {
+    filterSpec: Record<string, unknown>;
+  }): Promise<DatasetRelease> {
+    const row = await this.one<{
+      id: string; version: string; status: string; filter_spec: Record<string, unknown>;
+      license_tag: string; created_by: string | null; created_at: string;
+    }>(
+      `INSERT INTO dataset_releases (version, status, filter_spec, license_tag, created_by)
+       VALUES ($1,$2,$3,$4,$5)
+       RETURNING id, version, status, filter_spec, license_tag, created_by, created_at`,
+      [r.version, r.status, JSON.stringify(r.filterSpec), r.licenseTag, r.createdBy ?? null],
+    );
+    return {
+      id: row!.id, version: row!.version, status: row!.status as DatasetRelease['status'],
+      filterSpec: row!.filter_spec ?? {}, licenseTag: row!.license_tag,
+      createdBy: row!.created_by ?? undefined, createdAt: new Date(row!.created_at),
+    };
+  }
+  async getDatasetRelease(id: string): Promise<DatasetRelease | null> {
+    const row = await this.one<DrRow>('SELECT * FROM dataset_releases WHERE id = $1', [id]);
+    return this.mapDr(row);
+  }
+  async getDatasetReleaseByVersion(version: string): Promise<DatasetRelease | null> {
+    const row = await this.one<DrRow>('SELECT * FROM dataset_releases WHERE version = $1', [version]);
+    return this.mapDr(row);
+  }
+  async listDatasetReleases(): Promise<DatasetRelease[]> {
+    return (await this.many<DrRow>('SELECT * FROM dataset_releases ORDER BY created_at DESC')).map((r) => this.mapDr(r)!);
+  }
+  async insertDatasetItems(items: Array<Omit<DatasetItem, 'id'>>): Promise<void> {
+    for (const it of items) {
+      await this.db.query(
+        `INSERT INTO dataset_items (release_id, clip_id, transcription_id, split, ordinal, relative_path)
+         VALUES ($1,$2,$3,$4,$5,$6)`,
+        [it.releaseId, it.clipId, it.transcriptionId ?? null, it.split, it.ordinal, it.relativePath],
+      );
+    }
+  }
+  async listDatasetItems(releaseId: string): Promise<DatasetItem[]> {
+    const rows = await this.many<{
+      id: string; release_id: string; clip_id: string; transcription_id: string | null;
+      split: string; ordinal: number; relative_path: string;
+    }>('SELECT * FROM dataset_items WHERE release_id = $1 ORDER BY ordinal', [releaseId]);
+    return rows.map((r) => ({
+      id: r.id, releaseId: r.release_id, clipId: r.clip_id,
+      transcriptionId: r.transcription_id ?? undefined,
+      split: r.split as DatasetItem['split'], ordinal: r.ordinal, relativePath: r.relative_path,
+    }));
+  }
+  async publishDatasetRelease(
+    id: string,
+    data: { manifestJsonl: string; stats: Record<string, unknown> },
+  ): Promise<DatasetRelease | null> {
+    await this.db.query(
+      `UPDATE dataset_releases
+       SET status = 'published', manifest_jsonl = $2, stats = $3, published_at = now()
+       WHERE id = $1`,
+      [id, data.manifestJsonl, JSON.stringify(data.stats)],
+    );
+    return this.getDatasetRelease(id);
+  }
+  private mapDr(r: DrRow | null): DatasetRelease | null {
+    if (!r) return null;
+    return {
+      id: r.id, version: r.version, status: r.status as DatasetRelease['status'],
+      filterSpec: r.filter_spec ?? {}, licenseTag: r.license_tag,
+      manifestJsonl: r.manifest_jsonl ?? undefined,
+      stats: r.stats ?? undefined,
+      createdBy: r.created_by ?? undefined,
+      createdAt: new Date(r.created_at),
+      publishedAt: r.published_at ? new Date(r.published_at) : undefined,
+    };
+  }
+
 
   // — votes —
   async createVote(v: Omit<Vote, 'id' | 'createdAt'>): Promise<Vote> {
@@ -635,4 +716,9 @@ interface TrRow {
 interface AuditRow {
   id: string; actor_id: string; action: string; entity_type: string; entity_id: string;
   reason: string | null; metadata: Record<string, unknown> | null; created_at: string;
+}
+interface DrRow {
+  id: string; version: string; status: string; filter_spec: Record<string, unknown> | null;
+  license_tag: string; manifest_jsonl: string | null; stats: Record<string, unknown> | null;
+  created_by: string | null; created_at: string; published_at: string | null;
 }

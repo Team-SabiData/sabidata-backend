@@ -13,6 +13,7 @@ import { ContributionService } from './services/contributionService';
 import { WalletService } from './services/walletService';
 import { GovernanceService } from './services/governanceService';
 import { AdminService } from './services/adminService';
+import { DatasetExportService } from './services/datasetExportService';
 import { authenticate, requirePerm } from './http/guards';
 import { ForbiddenError, can } from './authz/can';
 import { permissionsFor } from './domain/roles';
@@ -200,6 +201,7 @@ export function buildServer(
 
   const governance = new GovernanceService(repo);
   const adminSvc = new AdminService(repo);
+  const datasetExport = new DatasetExportService(repo);
   app.register(
     (i) => {
       i.addHook('preHandler', authenticate('admin', repo));
@@ -393,6 +395,65 @@ export function buildServer(
       });
 
       // Journal d'audit immuable — lecture seule (admin uniquement).
+
+      // — Dataset releases —
+      i.get('/dataset/releases', { preHandler: requirePerm('export.run') }, async (req, reply) => {
+        try {
+          return { releases: await datasetExport.listReleases(req.principal!) };
+        } catch (e) {
+          return sendErr(reply, e);
+        }
+      });
+      i.get('/dataset/releases/:id', { preHandler: requirePerm('export.run') }, async (req, reply) => {
+        try {
+          const { id } = req.params as { id: string };
+          return await datasetExport.getRelease(req.principal!, id);
+        } catch (e) {
+          return sendErr(reply, e);
+        }
+      });
+      i.get('/dataset/releases/:id/manifest', { preHandler: requirePerm('export.run') }, async (req, reply) => {
+        try {
+          const { id } = req.params as { id: string };
+          const release = await datasetExport.getRelease(req.principal!, id);
+          if (!release.manifestJsonl) {
+            return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'manifest' } });
+          }
+          return reply
+            .header('content-type', 'application/x-ndjson; charset=utf-8')
+            .header('content-disposition', `attachment; filename="${release.version}-manifest.jsonl"`)
+            .send(release.manifestJsonl);
+        } catch (e) {
+          return sendErr(reply, e);
+        }
+      });
+      i.post('/dataset/releases', { preHandler: requirePerm('export.run') }, async (req, reply) => {
+        const body = (req.body ?? {}) as {
+          version?: string;
+          licenseTag?: string;
+          filter?: {
+            languages?: string[];
+            audioQualities?: Array<'A' | 'B' | 'C'>;
+            minTiers?: Array<'gold' | 'silver' | 'bronze'>;
+            commercialOnly?: boolean;
+            aOnly?: boolean;
+          };
+        };
+        if (!body.version?.trim()) {
+          return reply.code(400).send({ error: { code: 'BAD_INPUT', message: 'version requise' } });
+        }
+        try {
+          const r = await datasetExport.createRelease(req.principal!, {
+            version: body.version.trim(),
+            licenseTag: body.licenseTag,
+            filter: body.filter,
+          });
+          return reply.code(201).send(r);
+        } catch (e) {
+          return sendErr(reply, e);
+        }
+      });
+
       i.get('/audit-log', { preHandler: requirePerm('audit.read') }, async (req) => {
         const q = req.query as { actor?: string; entity?: string; action?: string };
         const entries = await governance.listAudit({ actorId: q.actor, entityId: q.entity, action: q.action });

@@ -13,6 +13,8 @@ import {
   type LanguageRow,
   type DialectRow,
   type PromptRow,
+  type DatasetRelease,
+  type DatasetItem,
 } from '../domain/contribution';
 
 export type UserStatus = 'active' | 'suspended' | 'banned' | 'deleted';
@@ -88,6 +90,21 @@ export interface Repo {
   }): Promise<PromptRow>;
   setPromptActive(stableId: string, active: boolean): Promise<PromptRow | null>;
 
+  listTranscriptionsForClip(clipId: string): Promise<Transcription[]>;
+
+  createDatasetRelease(r: Omit<DatasetRelease, 'id' | 'createdAt' | 'publishedAt' | 'manifestJsonl' | 'stats'> & {
+    filterSpec: Record<string, unknown>;
+  }): Promise<DatasetRelease>;
+  getDatasetRelease(id: string): Promise<DatasetRelease | null>;
+  getDatasetReleaseByVersion(version: string): Promise<DatasetRelease | null>;
+  listDatasetReleases(): Promise<DatasetRelease[]>;
+  insertDatasetItems(items: Array<Omit<DatasetItem, 'id'>>): Promise<void>;
+  listDatasetItems(releaseId: string): Promise<DatasetItem[]>;
+  publishDatasetRelease(
+    id: string,
+    data: { manifestJsonl: string; stats: Record<string, unknown> },
+  ): Promise<DatasetRelease | null>;
+
   createVote(v: Omit<Vote, 'id' | 'createdAt'>): Promise<Vote>;
   hasVotedClip(clipId: string, validatorId: string): Promise<boolean>;
   votesForClip(clipId: string): Promise<Vote[]>;
@@ -159,6 +176,8 @@ export class InMemoryRepo implements Repo {
   private languages: LanguageRow[] = [];
   private dialects: DialectRow[] = [];
   private prompts: PromptRow[] = [];
+  private datasetReleases: DatasetRelease[] = [];
+  private datasetItems: DatasetItem[] = [];
   private seq = 0;
   private id(p: string): string {
     return `${p}_${++this.seq}`;
@@ -309,6 +328,46 @@ export class InMemoryRepo implements Repo {
     if (!p) return null;
     if (!active) this.prompts = this.prompts.filter((x) => x.stableId !== stableId);
     return p;
+  }
+  async listTranscriptionsForClip(clipId: string) {
+    return this.transcriptions.filter((t) => t.clipId === clipId);
+  }
+  async createDatasetRelease(r: Omit<DatasetRelease, 'id' | 'createdAt' | 'publishedAt' | 'manifestJsonl' | 'stats'> & {
+    filterSpec: Record<string, unknown>;
+  }) {
+    const release: DatasetRelease = {
+      ...r,
+      id: this.id('dr'),
+      createdAt: new Date(),
+    };
+    this.datasetReleases.push(release);
+    return release;
+  }
+  async getDatasetRelease(id: string) {
+    return this.datasetReleases.find((r) => r.id === id) ?? null;
+  }
+  async getDatasetReleaseByVersion(version: string) {
+    return this.datasetReleases.find((r) => r.version === version) ?? null;
+  }
+  async listDatasetReleases() {
+    return [...this.datasetReleases].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  }
+  async insertDatasetItems(items: Array<Omit<DatasetItem, 'id'>>) {
+    for (const it of items) {
+      this.datasetItems.push({ ...it, id: this.id('di') });
+    }
+  }
+  async listDatasetItems(releaseId: string) {
+    return this.datasetItems.filter((i) => i.releaseId === releaseId).sort((a, b) => a.ordinal - b.ordinal);
+  }
+  async publishDatasetRelease(id: string, data: { manifestJsonl: string; stats: Record<string, unknown> }) {
+    const r = this.datasetReleases.find((x) => x.id === id);
+    if (!r) return null;
+    r.status = 'published';
+    r.manifestJsonl = data.manifestJsonl;
+    r.stats = data.stats;
+    r.publishedAt = new Date();
+    return r;
   }
   /** Seed mémoire pour tests (optionnel). */
   seedReferential(data: { languages: LanguageRow[]; dialects: DialectRow[]; prompts: PromptRow[] }) {

@@ -140,3 +140,29 @@ export interface Withdrawal {
   status: 'processing' | 'paid' | 'failed';
   createdAt: Date;
 }
+
+export type DatasetSplit = 'train' | 'dev' | 'test';
+export type DatasetReleaseStatus = 'drafting' | 'published' | 'superseded';
+
+export interface DatasetRelease {
+  id: string;
+  version: string;
+  status: DatasetReleaseStatus;
+  filterSpec: Record<string, unknown>;
+  licenseTag: string;
+  manifestJsonl?: string;
+  stats?: Record<string, unknown>;
+  createdBy?: string;
+  createdAt: Date;
+  publishedAt?: Date;
+}
+
+export interface DatasetItem {
+  id: string;
+  releaseId: string;
+  clipId: string;
+  transcriptionId?: string;
+  split: DatasetSplit;
+  ordinal: number;
+  relativePath: string;
+}

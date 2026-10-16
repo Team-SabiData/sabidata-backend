@@ -176,3 +176,29 @@ CREATE TABLE audit_log (
 );
 CREATE INDEX idx_audit_entity ON audit_log(entity_id);
 CREATE INDEX idx_audit_actor ON audit_log(actor_id);
+
+CREATE TABLE dataset_releases (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  version         text NOT NULL UNIQUE,
+  status          text NOT NULL DEFAULT 'drafting',
+  filter_spec     jsonb NOT NULL DEFAULT '{}',
+  license_tag     text NOT NULL DEFAULT 'commercial',
+  manifest_jsonl  text,
+  stats           jsonb,
+  created_by      uuid REFERENCES users(id),
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  published_at    timestamptz
+);
+
+CREATE TABLE dataset_items (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  release_id        uuid NOT NULL REFERENCES dataset_releases(id) ON DELETE CASCADE,
+  clip_id           uuid NOT NULL REFERENCES clips(id),
+  transcription_id  uuid REFERENCES transcriptions(id),
+  split             text NOT NULL CHECK (split IN ('train','dev','test')),
+  ordinal           integer NOT NULL,
+  relative_path     text NOT NULL,
+  UNIQUE (release_id, ordinal),
+  UNIQUE (release_id, clip_id)
+);
+CREATE INDEX idx_dataset_items_release ON dataset_items(release_id);
