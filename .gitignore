@@ -5,3 +5,4 @@ dist/
 
 # Blobs audio stockés localement (dev)
 var/
+.local/
