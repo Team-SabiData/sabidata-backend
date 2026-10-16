@@ -104,15 +104,18 @@ export async function ensureMigrations(db: SqlDb): Promise<void> {
   await db.query(`CREATE INDEX IF NOT EXISTS idx_dataset_items_release ON dataset_items(release_id)`);
 }
 
+/** Upsert référentiel à chaque boot — met à jour name_fr/zone (ex. toponymes BF 2025). */
 async function seedReferential(db: SqlDb): Promise<void> {
-  const existing = await db.query<{ n: string }>('SELECT COUNT(*)::text AS n FROM languages');
-  if (Number(existing.rows[0]?.n ?? 0) > 0) return;
-
   const langIds = new Map<string, string>();
   for (const lang of SEED_LANGUAGES) {
     const row = await db.query<{ id: string }>(
       `INSERT INTO languages (code, name_fr, iso_bcp47, status)
-       VALUES ($1,$2,$3,$4) RETURNING id`,
+       VALUES ($1,$2,$3,$4)
+       ON CONFLICT (code) DO UPDATE SET
+         name_fr = EXCLUDED.name_fr,
+         iso_bcp47 = EXCLUDED.iso_bcp47,
+         status = EXCLUDED.status
+       RETURNING id`,
       [lang.code, lang.nameFr, lang.isoBcp47, lang.status],
     );
     langIds.set(lang.code, row.rows[0]!.id);
@@ -124,7 +127,12 @@ async function seedReferential(db: SqlDb): Promise<void> {
     if (!languageId) continue;
     const row = await db.query<{ id: string }>(
       `INSERT INTO dialects (language_id, code, name_fr, zone, target_hours)
-       VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (language_id, code) DO UPDATE SET
+         name_fr = EXCLUDED.name_fr,
+         zone = EXCLUDED.zone,
+         target_hours = EXCLUDED.target_hours
+       RETURNING id`,
       [languageId, d.code, d.nameFr, d.zone, d.targetHours],
     );
     dialectIds.set(`${d.languageCode}:${d.code}`, row.rows[0]!.id);

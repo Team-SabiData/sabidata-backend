@@ -45,5 +45,5 @@ test('buildRegionCoverage : fusionne comptes clips et catalogue, pct plafonné',
   assert.equal(ouaga.coveragePct, 0.5);
   assert.equal(yat.coveragePct, 1);    // 2000/1000 plafonné à 1
   assert.equal(dori.clips, 0);
-  assert.equal(dori.zone, 'Sahel');
+  assert.equal(dori.zone, 'Liptako');
 });

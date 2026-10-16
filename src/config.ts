@@ -34,15 +34,25 @@ export const CONFIG = {
   jwt: { accessTtl: '1h', refreshTtl: '30d', adminSessionTtl: '30m' },
 
   // Mobile — couverture régionale (GET /regions)
+  // Toponymes officiels BF (décret juil. 2025) — 17 régions, chef-lieux.
   regionTargetClips: 1000,
   regions: [
-    { name: 'Ouagadougou', zone: 'Centre' },
-    { name: 'Koudougou', zone: 'Plateau Central' },
-    { name: 'Ouahigouya', zone: 'Nord' },
-    { name: 'Yatenga', zone: 'Nord' },
-    { name: 'Bobo-Dioulasso', zone: 'Hauts-Bassins' },
-    { name: 'Dédougou', zone: 'Boucle du Mouhoun' },
-    { name: 'Dori', zone: 'Sahel' },
-    { name: "Fada N'Gourma", zone: 'Est' },
+    { name: 'Ouagadougou', zone: 'Kadiogo' },
+    { name: 'Koudougou', zone: 'Nando' },
+    { name: 'Ouahigouya', zone: 'Yaadga' },
+    { name: 'Bobo-Dioulasso', zone: 'Guiriko' },
+    { name: 'Dédougou', zone: 'Bankui' },
+    { name: 'Tougan', zone: 'Sourou' },
+    { name: 'Dori', zone: 'Liptako' },
+    { name: 'Djibo', zone: 'Soum' },
+    { name: "Fada N'Gourma", zone: 'Goulmou' },
+    { name: 'Bogandé', zone: 'Sirba' },
+    { name: 'Diapaga', zone: 'Tapoa' },
+    { name: 'Gaoua', zone: 'Djôrô' },
+    { name: 'Banfora', zone: 'Tannounyan' },
+    { name: 'Kaya', zone: 'Kuilsé' },
+    { name: 'Tenkodogo', zone: 'Nakambé' },
+    { name: 'Manga', zone: 'Nazinon' },
+    { name: 'Ziniaré', zone: 'Oubri' },
   ],
 } as const;
