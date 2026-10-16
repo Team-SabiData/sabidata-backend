@@ -57,10 +57,11 @@ export async function contributionRoutes(
       p.userId,
       {
         promptId: body.promptId,
-        rarity: body.rarity as 0 | 1 | 2,
+        rarity: body.rarity as 0 | 1 | 2 | undefined,
         durationS: body.durationS,
         commercialUse: body.commercialUse,
         consentVersion: body.consentVersion,
+        clientUuid: body.clientUuid,
         language: body.language,
         dialect: body.dialect,
         region: body.region,

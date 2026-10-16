@@ -49,18 +49,21 @@ export class PgRepo implements Repo {
     return this.mapUser(row)!;
   }
   async saveOtp(phone: string, code: string, expiresAt: Date) {
+    const { hashOtp } = await import('../auth/otp');
+    const digest = hashOtp(code);
     await this.db.query(
       `INSERT INTO otp_codes (phone, code, expires_at) VALUES ($1,$2,$3)
        ON CONFLICT (phone) DO UPDATE SET code = $2, expires_at = $3`,
-      [phone, code, expiresAt],
+      [phone, digest, expiresAt],
     );
   }
   async consumeOtp(phone: string, code: string): Promise<boolean> {
+    const { otpMatches } = await import('../auth/otp');
     const row = await this.one<{ code: string; expires_at: string }>(
       'SELECT code, expires_at FROM otp_codes WHERE phone = $1',
       [phone],
     );
-    if (!row || row.code !== code || new Date(row.expires_at) < new Date()) return false;
+    if (!row || new Date(row.expires_at) < new Date() || !otpMatches(code, row.code)) return false;
     await this.db.query('DELETE FROM otp_codes WHERE phone = $1', [phone]);
     return true;
   }
@@ -69,17 +72,24 @@ export class PgRepo implements Repo {
   async createClip(c: Omit<Clip, 'id' | 'createdAt'>): Promise<Clip> {
     const row = await this.one<ClipRow>(
       `INSERT INTO clips
-         (contributor_id, prompt_id, rarity, duration_s, required_competence, language, dialect, region, classroom_id, status,
+         (contributor_id, prompt_id, rarity, duration_s, required_competence, language, dialect, region, classroom_id, client_uuid, status,
           commercial_use, consent_version, license_tag, provenance, autocheck)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING *`,
       [
         c.contributorId, c.promptId ?? null, c.rarity, c.durationS, c.requiredCompetence,
-        c.language ?? null, c.dialect ?? null, c.region ?? null, c.classroomId ?? null, c.status,
+        c.language ?? null, c.dialect ?? null, c.region ?? null, c.classroomId ?? null, c.clientUuid ?? null, c.status,
         c.consent.commercialUse, c.consent.consentVersion, c.consent.licenseTag,
         JSON.stringify(c.consent.provenance), c.autocheck ? JSON.stringify(c.autocheck) : null,
       ],
     );
     return this.mapClip(row)!;
+  }
+  async findClipByClientUuid(contributorId: string, clientUuid: string) {
+    const row = await this.one<ClipRow>(
+      'SELECT * FROM clips WHERE contributor_id = $1 AND client_uuid = $2',
+      [contributorId, clientUuid],
+    );
+    return this.mapClip(row);
   }
   async getClip(id: string) {
     return this.mapClip(await this.one<ClipRow>('SELECT * FROM clips WHERE id = $1', [id]));
@@ -330,6 +340,7 @@ export class PgRepo implements Repo {
       rarity: r.rarity as Rarity, durationS: r.duration_s, requiredCompetence: r.required_competence,
       language: r.language ?? undefined, dialect: r.dialect ?? undefined, region: r.region ?? undefined,
       classroomId: r.classroom_id ?? undefined,
+      clientUuid: r.client_uuid ?? undefined,
       status: r.status as ClipState, consent, autocheck: r.autocheck ?? undefined,
       audioPath: r.audio_path ?? undefined,
       createdAt: new Date(r.created_at),
@@ -390,7 +401,7 @@ interface WithdrawalRow {
 interface ClipRow {
   id: string; contributor_id: string; prompt_id: string | null; rarity: number; duration_s: number;
   required_competence: number; language: string | null; dialect: string | null; region: string | null;
-  classroom_id: string | null;
+  classroom_id: string | null; client_uuid: string | null;
   status: string; commercial_use: boolean; consent_version: string;
   license_tag: string; provenance: Record<string, unknown> | null; autocheck: Record<string, unknown> | null;
   audio_path: string | null;

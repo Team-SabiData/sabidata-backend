@@ -10,16 +10,27 @@ function principal(role: Principal['role'], competence: Principal['competence'],
 }
 const consent = { commercialUse: true, consentVersion: 'v1' };
 
-test('flux — clip valide (5s, rareté ×3) → peer_review + ledger provisoire 150', async () => {
+test('flux — clip valide (5s) → peer_review + ledger provisoire (rareté serveur)', async () => {
   const repo = new InMemoryRepo();
   const svc = new ContributionService(repo);
+  // Sans région → rareté serveur 0 → reward 50 (client rarity ignorée)
   const r = await svc.submitClip('alice', { rarity: 2, durationS: 5, ...consent });
   assert.equal(r.status, 'peer_review');
-  assert.equal(r.reward, 150); // 50 × 3 (D4)
-  assert.equal(r.licenseTag, 'commercial-v1'); // décision 4
+  assert.equal(r.reward, 50);
+  assert.equal(r.licenseTag, 'commercial-v1');
   const ledger = await repo.ledgerFor('alice');
   assert.equal(ledger.length, 1);
   assert.equal(ledger[0]?.state, 'provisional');
+});
+
+test('flux — rareté ×3 si région sous-couverte (serveur)', async () => {
+  const repo = new InMemoryRepo();
+  const svc = new ContributionService(repo);
+  const u = await repo.createUser({
+    name: 'Awa', role: 'contributor', competence: 0, phoneVerified: true, region: 'Dori',
+  });
+  const r = await svc.submitClip(u.id, { durationS: 5, region: 'Dori', ...consent });
+  assert.equal(r.reward, 150); // couverture ~0 → rarity 2
 });
 
 test('flux — auto-check rejette un clip trop court (0s), aucun crédit', async () => {
@@ -125,7 +136,10 @@ test('flux — double vote interdit (idempotence D7)', async () => {
 test('flux — validateur sous-qualifié refusé sur contenu rare', async () => {
   const repo = new InMemoryRepo();
   const svc = new ContributionService(repo);
-  const { clipId } = await svc.submitClip('alice', { rarity: 2, durationS: 4, ...consent }); // requiredCompetence=2
+  const author = await repo.createUser({
+    name: 'Alice', role: 'contributor', competence: 0, phoneVerified: true, region: 'Dori',
+  });
+  const { clipId } = await svc.submitClip(author.id, { durationS: 4, region: 'Dori', ...consent }); // rarity 2
   await assert.rejects(
     () => svc.submitVote(principal('validator', 1, 'bob'), clipId, 'correct'),
     /forbidden/,
@@ -143,7 +157,9 @@ test('flux — transcription std + 2 votes qualifiés → tier OR (D1)', async (
   const repo = new InMemoryRepo();
   const svc = new ContributionService(repo);
   const author = principal('validator', 1, 'alice');
-  const { id } = await svc.submitTranscription(author, { text: 'kɛɛrɛ', writingSystem: 'std', consistency: 1 });
+  const { id } = await svc.submitTranscription(author, {
+    archiveId: 'arch-1', text: 'kɛɛrɛ', writingSystem: 'std', consistency: 1,
+  });
   await svc.voteTranscription(principal('validator', 2, 'bob'), id, 'correct', { writingSystem: 'std', consistency: 1 });
   const r = await svc.voteTranscription(principal('validator', 3, 'carol'), id, 'correct', { writingSystem: 'std', consistency: 1 });
   assert.equal(r.tier, 'gold');
@@ -165,7 +181,7 @@ test('flux — clip valide stocke l\'audio et renseigne audioPath', async () => 
   const { clipId } = await svc.submitClip(
     'alice',
     { rarity: 1, durationS: 4, ...consent },
-    { buffer: Buffer.from('AUDIO'), ext: 'm4a' },
+    { buffer: Buffer.alloc(1200, 1), ext: 'm4a' },
   );
   const clip = await repo.getClip(clipId);
   assert.equal(clip?.audioPath, `${clipId}.m4a`);

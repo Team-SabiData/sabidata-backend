@@ -46,7 +46,7 @@ CREATE TABLE classrooms (
 
 CREATE TABLE otp_codes (
   phone      text PRIMARY KEY,
-  code       text NOT NULL,
+  code       text NOT NULL, -- SHA-256 hex du code (jamais en clair)
   expires_at timestamptz NOT NULL
 );
 
@@ -62,6 +62,7 @@ CREATE TABLE clips (
   dialect             text,
   region              text,
   classroom_id        uuid, -- classroom du contributeur au moment de l'envoi
+  client_uuid         uuid, -- idempotence outbox mobile
   status              clip_status NOT NULL DEFAULT 'pending',
   -- décision 4 : chaîne de consentement (immuable applicativement)
   commercial_use      boolean NOT NULL,
@@ -74,6 +75,7 @@ CREATE TABLE clips (
 );
 CREATE INDEX idx_clips_status ON clips(status);
 CREATE INDEX idx_clips_lang_dialect ON clips(language, dialect);
+CREATE UNIQUE INDEX idx_clips_client_uuid ON clips(contributor_id, client_uuid) WHERE client_uuid IS NOT NULL;
 
 CREATE TABLE transcriptions (
   id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),

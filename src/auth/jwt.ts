@@ -33,3 +33,16 @@ export function verifyRefresh(token: string): { sub: string } {
   if (p.typ !== 'refresh') throw new Error('NOT_REFRESH');
   return { sub: p.sub };
 }
+
+/** Challenge admin post-password : lié à l'identité, TTL court, non forgeable sans JWT_SECRET. */
+export function signAdminTotpChallenge(userId: string, ttl = '5m'): string {
+  return jwt.sign({ sub: userId, typ: 'admin_totp', aud: 'admin' }, SECRET, {
+    expiresIn: ttl,
+  } as jwt.SignOptions);
+}
+
+export function verifyAdminTotpChallenge(token: string): { sub: string } {
+  const p = jwt.verify(token, SECRET, { audience: 'admin' }) as { sub: string; typ?: string };
+  if (p.typ !== 'admin_totp') throw new Error('NOT_ADMIN_CHALLENGE');
+  return { sub: p.sub };
+}

@@ -41,7 +41,7 @@ const JOIN_MAX = 8;
 const JOIN_WINDOW_MS = 60_000;
 
 export async function classroomRoutes(app: FastifyInstance, repo: Repo, wallet: WalletService): Promise<void> {
-  app.addHook('preHandler', authenticate('mobile'));
+  app.addHook('preHandler', authenticate('mobile', repo));
 
   // État du rate-limit, scopé à l'instance serveur (in-memory).
   const joinHits = new Map<string, number[]>();

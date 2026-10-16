@@ -45,6 +45,7 @@ export interface Repo {
 
   // — contribution —
   createClip(c: Omit<Clip, 'id' | 'createdAt'>): Promise<Clip>;
+  findClipByClientUuid(contributorId: string, clientUuid: string): Promise<Clip | null>;
   getClip(id: string): Promise<Clip | null>;
   setClipStatus(id: string, status: ClipState, autocheck?: Record<string, unknown>): Promise<void>;
   setClipAudio(id: string, audioPath: string): Promise<void>;
@@ -139,11 +140,13 @@ export class InMemoryRepo implements Repo {
     return user;
   }
   async saveOtp(phone: string, code: string, expiresAt: Date) {
-    this.otps.set(phone, { code, expiresAt });
+    const { hashOtp } = await import('../auth/otp');
+    this.otps.set(phone, { code: hashOtp(code), expiresAt });
   }
   async consumeOtp(phone: string, code: string) {
+    const { otpMatches } = await import('../auth/otp');
     const rec = this.otps.get(phone);
-    if (!rec || rec.expiresAt < new Date() || rec.code !== code) return false;
+    if (!rec || rec.expiresAt < new Date() || !otpMatches(code, rec.code)) return false;
     this.otps.delete(phone);
     return true;
   }
@@ -152,6 +155,9 @@ export class InMemoryRepo implements Repo {
     const clip: Clip = { ...c, id: this.id('c'), createdAt: new Date() };
     this.clips.push(clip);
     return clip;
+  }
+  async findClipByClientUuid(contributorId: string, clientUuid: string) {
+    return this.clips.find((c) => c.contributorId === contributorId && c.clientUuid === clientUuid) ?? null;
   }
   async getClip(id: string) {
     return this.clips.find((c) => c.id === id) ?? null;

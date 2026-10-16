@@ -12,11 +12,13 @@ export const ClipReq = z.object({
 // Variante multipart : les champs form-data arrivent en strings → coercition.
 export const ClipMultipartReq = z.object({
   promptId: z.string().optional(),
-  rarity: z.coerce.number().int().refine((v) => v === 0 || v === 1 || v === 2, 'rarity ∈ {0,1,2}'),
+  // rarity client ignoré côté service (dérivé couverture région) — accepté pour compat.
+  rarity: z.coerce.number().int().refine((v) => v === 0 || v === 1 || v === 2, 'rarity ∈ {0,1,2}').optional(),
   durationS: z.coerce.number().int().nonnegative(),
   commercialUse: z.enum(['true', 'false']).transform((v) => v === 'true'),
   consentVersion: z.string().min(1),
-  // classification linguistique (profil contributeur) — regroupement des audios en BD
+  clientUuid: z.string().uuid().optional(),
+  // classification : le serveur préfère le profil user ; champs optionnels en secours
   language: z.string().min(1).optional(),
   dialect: z.string().min(1).optional(),
   region: z.string().min(1).optional(),

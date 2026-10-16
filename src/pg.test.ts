@@ -29,10 +29,10 @@ test('PG — flux complet sur PgRepo : clip → peer_review → validated + ledg
   const carol = await repo.createUser({ name: 'Carol', role: 'validator', competence: 2, phoneVerified: false });
 
   const sub = await svc.submitClip(alice.id, {
-    rarity: 2, durationS: 5, commercialUse: true, consentVersion: 'v1',
+    durationS: 5, commercialUse: true, consentVersion: 'v1', region: 'Dori',
   });
   assert.equal(sub.status, 'peer_review');
-  assert.equal(sub.reward, 150);
+  assert.equal(sub.reward, 150); // rareté serveur (Dori sous-couverte)
 
   // ledger provisoire persisté
   let ledger = await repo.ledgerFor(alice.id);

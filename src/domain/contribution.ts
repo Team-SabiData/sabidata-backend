@@ -32,6 +32,7 @@ export interface Clip {
   dialect?: string; // dialecte / localité
   region?: string; // zone du Burkina Faso
   classroomId?: string; // classroom du contributeur au moment de l'envoi
+  clientUuid?: string; // idempotence client (outbox)
   status: ClipState;
   consent: Consent;
   autocheck?: Record<string, unknown>;

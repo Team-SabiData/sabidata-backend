@@ -5,6 +5,7 @@ import { generateTotpSecret, verifyTotp, currentTotp } from './auth/totp';
 import { buildServer, seedDevAdmin } from './server';
 import { InMemoryRepo } from './ports/repo';
 import { verifyAccess } from './auth/jwt';
+import { resetRateLimits } from './http/rateLimit';
 
 // — mot de passe : argon2id salé —
 test('crypto — un mot de passe correct se vérifie, un mauvais échoue', () => {
@@ -30,6 +31,7 @@ test('totp — le code courant valide, un code arbitraire échoue', () => {
 
 // — escalade de privilège : un moderator ne doit JAMAIS recevoir un token role=admin —
 async function makeServer() {
+  resetRateLimits();
   const repo = new InMemoryRepo();
   const secret = generateTotpSecret();
   await repo.createUser({

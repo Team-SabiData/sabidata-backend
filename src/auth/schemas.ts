@@ -16,7 +16,7 @@ export const LoginReq = z.object({
   password: z.string().min(6),
 });
 export const OtpReq = z.object({ phone: z.string().min(8) });
-export const VerifyReq = z.object({ phone: z.string().min(8), code: z.string().length(4) });
+export const VerifyReq = z.object({ phone: z.string().min(8), code: z.string().length(6) });
 
 // Admin (décision 3 : email+password puis TOTP obligatoire)
 export const AdminLoginReq = z.object({

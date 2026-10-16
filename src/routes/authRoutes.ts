@@ -6,6 +6,7 @@ import { hashPassword, verifyPassword } from '../auth/crypto';
 import { type Repo, type UserRecord } from '../ports/repo';
 import { CONFIG } from '../config';
 import { generateOtp, sendOtpSms } from '../services/sms';
+import { checkRateLimit } from '../http/rateLimit';
 
 function publicUser(u: UserRecord) {
   return { id: u.id, name: u.name, role: u.role, competence: u.competence };
@@ -70,9 +71,14 @@ export async function authRoutes(app: FastifyInstance, repo: Repo): Promise<void
   // /login accepte soit email+password (compte inscrit), soit phone seul
   // (entrée du flux OTP — cf. décision 2, téléphone = ancre principale).
   app.post('/login', async (req, reply) => {
+    const ip = req.ip || 'unknown';
     const raw = (req.body ?? {}) as { phone?: unknown };
     if (typeof raw.phone === 'string') {
       const { phone } = OtpReq.parse(raw);
+      const rl = checkRateLimit(`otp:${ip}:${phone}`, { windowMs: 15 * 60_000, max: 5 });
+      if (!rl.ok) {
+        return reply.code(429).send({ error: { code: 'TOO_MANY_REQUESTS', message: `réessayer dans ${rl.retryAfterSec}s` } });
+      }
       const user = await repo.findUserByPhone(phone);
       if (user && (user.status ?? 'active') !== 'active') {
         return accountDisabled(reply);
@@ -81,6 +87,10 @@ export async function authRoutes(app: FastifyInstance, repo: Repo): Promise<void
       await repo.saveOtp(phone, code, new Date(Date.now() + 5 * 60_000));
       await sendOtpSms(phone, code);
       return reply.code(202).send(); // anti-énumération : toujours 202
+    }
+    const rlLogin = checkRateLimit(`login:${ip}`, { windowMs: 60_000, max: 20 });
+    if (!rlLogin.ok) {
+      return reply.code(429).send({ error: { code: 'TOO_MANY_REQUESTS', message: `réessayer dans ${rlLogin.retryAfterSec}s` } });
     }
     const body = LoginReq.parse(req.body);
     const user = await repo.findUserByEmail(body.email);
@@ -97,6 +107,11 @@ export async function authRoutes(app: FastifyInstance, repo: Repo): Promise<void
 
   app.post('/otp', async (req, reply) => {
     const body = OtpReq.parse(req.body);
+    const ip = req.ip || 'unknown';
+    const rl = checkRateLimit(`otp:${ip}:${body.phone}`, { windowMs: 15 * 60_000, max: 5 });
+    if (!rl.ok) {
+      return reply.code(429).send({ error: { code: 'TOO_MANY_REQUESTS', message: `réessayer dans ${rl.retryAfterSec}s` } });
+    }
     const user = await repo.findUserByPhone(body.phone);
     if (user && (user.status ?? 'active') !== 'active') {
       return accountDisabled(reply);
@@ -109,6 +124,11 @@ export async function authRoutes(app: FastifyInstance, repo: Repo): Promise<void
 
   app.post('/verify', async (req, reply) => {
     const body = VerifyReq.parse(req.body);
+    const ip = req.ip || 'unknown';
+    const rl = checkRateLimit(`verify:${ip}:${body.phone}`, { windowMs: 15 * 60_000, max: 10 });
+    if (!rl.ok) {
+      return reply.code(429).send({ error: { code: 'TOO_MANY_REQUESTS', message: `réessayer dans ${rl.retryAfterSec}s` } });
+    }
     if (!(await repo.consumeOtp(body.phone, body.code))) {
       return reply.code(401).send({ error: { code: 'BAD_CODE', message: 'code invalide ou expiré' } });
     }

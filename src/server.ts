@@ -76,7 +76,7 @@ export function buildServer(repo: Repo = new InMemoryRepo(), audioStore: AudioSt
 
   app.register(
     async (i) => {
-      i.addHook('preHandler', authenticate('mobile'));
+      i.addHook('preHandler', authenticate('mobile', repo));
 
       // Profil enrichi — renvoie nom, rôle, compétence et points
       i.get('/me', async (req) => {
@@ -185,7 +185,7 @@ export function buildServer(repo: Repo = new InMemoryRepo(), audioStore: AudioSt
   const adminSvc = new AdminService(repo);
   app.register(
     (i) => {
-      i.addHook('preHandler', authenticate('admin'));
+      i.addHook('preHandler', authenticate('admin', repo));
       // Toutes les mutations admin sont gardées par le garde central can().
       const sendErr = (reply: FastifyReply, e: unknown) => {
         if (e instanceof ForbiddenError) return reply.code(403).send({ error: { code: 'FORBIDDEN', message: e.perm } });

@@ -43,17 +43,37 @@ export class ContributionService {
     contributorId: string,
     input: {
       promptId?: string;
-      rarity: Rarity;
+      /** @deprecated ignoré — rareté dérivée serveur */
+      rarity?: Rarity;
       durationS: number;
       commercialUse: boolean;
       consentVersion: string;
       language?: string;
       dialect?: string;
       region?: string;
+      clientUuid?: string;
     },
     audio?: { buffer: Buffer; ext: string },
   ): Promise<{ clipId: string; status: ClipState; reward: number; licenseTag: string }> {
-    const { passed, report } = autocheck(input.durationS);
+    const contributor = await this.repo.findUserById(contributorId);
+    // Idempotence : même clientUuid → même clip (pas de double crédit).
+    if (input.clientUuid) {
+      const existing = await this.repo.findClipByClientUuid(contributorId, input.clientUuid);
+      if (existing) {
+        return {
+          clipId: existing.id,
+          status: existing.status,
+          reward: 0,
+          licenseTag: existing.consent.licenseTag,
+        };
+      }
+    }
+
+    // Anti empty-audio : buffer trop petit = rejet (durée client ne suffit pas).
+    const minBytes = 800;
+    const audioOk = !audio || audio.buffer.length >= minBytes;
+    const { passed: durationOk, report } = autocheck(input.durationS);
+    const passed = durationOk && audioOk;
     const status: ClipState = passed ? 'peer_review' : 'rejected';
     const licenseTag = input.commercialUse ? `commercial-${input.consentVersion}` : `noncommercial-${input.consentVersion}`;
     const consent: Consent = {
@@ -63,24 +83,29 @@ export class ContributionService {
       provenance: { capturedAt: new Date().toISOString(), device: 'mobile', source: 'sabidata-app' },
     };
 
-    // Rattache le clip au classroom courant du contributeur (collecte de groupe).
-    const contributor = await this.repo.findUserById(contributorId);
+    // Langue / région : profil serveur prioritaire (anti spoof client).
+    const language = contributor?.language ?? input.language;
+    const dialect = contributor?.dialect ?? input.dialect;
+    const region = contributor?.region ?? input.region;
+
+    // Rareté dérivée de la couverture régionale — jamais du body client.
+    const rarity = await this.serverRarity(region);
     const clip = await this.repo.createClip({
       contributorId,
       promptId: input.promptId,
-      rarity: input.rarity,
+      rarity,
       durationS: input.durationS,
-      requiredCompetence: requiredCompetenceFor(input.rarity),
-      language: input.language,
-      dialect: input.dialect,
-      region: input.region,
+      requiredCompetence: requiredCompetenceFor(rarity),
+      language,
+      dialect,
+      region,
       classroomId: contributor?.classroomId,
+      clientUuid: input.clientUuid,
       status,
       consent,
-      autocheck: report,
+      autocheck: { ...report, audioBytes: audio?.buffer.length ?? 0, audioOk },
     });
 
-    // Stocke le blob audio uniquement si l'auto-check passe (un clip rejeté ne laisse aucun fichier).
     if (passed && audio) {
       const path = await this.audioStore.save(clip.id, audio.buffer, audio.ext);
       await this.repo.setClipAudio(clip.id, path);
@@ -88,8 +113,7 @@ export class ContributionService {
 
     let reward = 0;
     if (passed) {
-      // D4 : crédit PROVISOIRE à la soumission (× rareté sur l'enregistrement).
-      reward = CONFIG.rewards.record * (CONFIG.rarityMult[input.rarity] ?? 1);
+      reward = CONFIG.rewards.record * (CONFIG.rarityMult[rarity] ?? 1);
       await this.repo.addLedger({
         userId: contributorId,
         delta: reward,
@@ -99,6 +123,16 @@ export class ContributionService {
       });
     }
     return { clipId: clip.id, status, reward, licenseTag };
+  }
+
+  private async serverRarity(region?: string): Promise<Rarity> {
+    if (!region) return 0;
+    const counts = await this.repo.countClipsByRegion();
+    const clips = counts.find((c) => c.region === region)?.clips ?? 0;
+    const pct = clips / CONFIG.regionTargetClips;
+    if (pct < 0.1) return 2;
+    if (pct < 0.4) return 1;
+    return 0;
   }
 
   // GET /validation/next — routé par competence_level (décision 1/2)
@@ -175,13 +209,25 @@ export class ContributionService {
     p: Principal,
     input: { clipId?: string; archiveId?: string; text: string; writingSystem: WritingSystem; consistency: number },
   ): Promise<{ id: string; reward: number }> {
+    if (!input.clipId && !input.archiveId) throw conflict('target_required');
+    if (input.clipId) {
+      const clip = await this.repo.getClip(input.clipId);
+      if (!clip) throw notFound('clip');
+      if (clip.status !== 'validated') throw conflict('clip_not_validated');
+      if (clip.contributorId === p.userId) throw conflict('own_clip');
+      const me = (await this.repo.findUserById(p.userId)) ?? {};
+      if (!sameLinguistic(me, clip)) throw conflict('wrong_language');
+      if (await this.repo.hasTranscribedClip(input.clipId, p.userId)) throw conflict('already_transcribed');
+    }
+    // consistency client non trusted pour le reward — fixée côté serveur à 0.6
+    const consistency = 0.6;
     const tr = await this.repo.createTranscription({
       authorId: p.userId,
       clipId: input.clipId,
       archiveId: input.archiveId,
       text: input.text,
       writingSystem: input.writingSystem,
-      consistency: input.consistency,
+      consistency,
     });
     const reward = CONFIG.rewards.transcribe;
     await this.repo.addLedger({ userId: p.userId, delta: reward, reason: 'transcribe', state: 'confirmed', refTranscriptionId: tr.id });

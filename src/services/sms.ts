@@ -9,8 +9,8 @@
  *   VONAGE_API_KEY, VONAGE_API_SECRET, VONAGE_FROM, SMS_ENABLED
  */
 
-import { randomInt } from 'node:crypto';
 import { Vonage } from '@vonage/server-sdk';
+import { generateOtpCode } from '../auth/otp';
 
 const smsEnabled = process.env.SMS_ENABLED === 'true';
 
@@ -23,13 +23,12 @@ function getVonage(): Vonage | null {
 }
 
 /**
- * Génère un code OTP numérique à 4 chiffres.
- * randomInt (CSPRNG) — Math.random() est prévisible, inacceptable pour un OTP.
- * En mode DEV (SMS_ENABLED=false), retourne toujours "0000".
+ * Génère un OTP à 6 chiffres (CSPRNG).
+ * En mode sans SMS, le code est toujours aléatoire et loggé — plus de « 0000 » fixe
+ * (évite la prise de compte triviale si STAGING fuit en prod).
  */
 export function generateOtp(): string {
-  if (!smsEnabled) return '0000';
-  return String(randomInt(0, 10000)).padStart(4, '0');
+  return generateOtpCode();
 }
 
 /**

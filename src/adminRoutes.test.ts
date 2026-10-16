@@ -5,8 +5,10 @@ import { InMemoryRepo } from './ports/repo';
 import { InMemoryAudioStore } from './storage/audioStore';
 import { currentTotp } from './auth/totp';
 import { hashPassword } from './auth/crypto';
+import { resetRateLimits } from './http/rateLimit';
 
 async function adminToken(app: ReturnType<typeof buildServer>) {
+  resetRateLimits();
   const login = await app.inject({
     method: 'POST', url: '/admin/auth/login',
     payload: { email: 'admin@sabidata.bf', password: 'admin123' },

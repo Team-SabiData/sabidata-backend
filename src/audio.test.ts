@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { InMemoryRepo } from './ports/repo';
 import { FsAudioStore } from './storage/audioStore';
 import { buildServer } from './server';
+import { resetRateLimits } from './http/rateLimit';
 
 // Construit un corps multipart/form-data minimal (sans dépendance externe).
 function multipart(
@@ -29,6 +30,7 @@ function multipart(
 
 // Inscrit un utilisateur mobile et renvoie {app, token, repo, store}.
 async function setup() {
+  resetRateLimits();
   const dir = mkdtempSync(join(tmpdir(), 'sabi-audio-'));
   const repo = new InMemoryRepo();
   const store = new FsAudioStore(dir);
@@ -152,11 +154,12 @@ test('refresh — access renouvelé via refresh token ; refresh invalide → 401
 });
 
 const goodFields = { rarity: '1', durationS: '4', commercialUse: 'true', consentVersion: 'v1' };
+const goodAudio = Buffer.alloc(1200, 0x41); // ≥ 800 octets (anti empty-audio serveur)
 
 test('POST /api/clips multipart — 201, stocke l\'audio, audioPath renseigné', async () => {
   const { app, token, repo, dir } = await setup();
   try {
-    const mp = multipart(goodFields, { field: 'audio', filename: 'c.m4a', contentType: 'audio/mp4', data: Buffer.from('AUDIODATA') });
+    const mp = multipart(goodFields, { field: 'audio', filename: 'c.m4a', contentType: 'audio/mp4', data: goodAudio });
     const res = await app.inject({
       method: 'POST',
       url: '/api/clips',
@@ -237,7 +240,7 @@ test('POST /api/clips multipart — sans fichier audio → 400', async () => {
 test('GET /api/clips/:id/audio — renvoie les octets stockés', async () => {
   const { app, token, dir } = await setup();
   try {
-    const mp = multipart(goodFields, { field: 'audio', filename: 'c.m4a', contentType: 'audio/mp4', data: Buffer.from('AUDIODATA') });
+    const mp = multipart(goodFields, { field: 'audio', filename: 'c.m4a', contentType: 'audio/mp4', data: goodAudio });
     const post = await app.inject({
       method: 'POST', url: '/api/clips',
       headers: { authorization: `Bearer ${token}`, 'content-type': mp.contentType },
@@ -249,7 +252,7 @@ test('GET /api/clips/:id/audio — renvoie les octets stockés', async () => {
       headers: { authorization: `Bearer ${token}` },
     });
     assert.equal(res.statusCode, 200);
-    assert.equal(res.rawPayload.toString(), 'AUDIODATA');
+    assert.equal(res.rawPayload.equals(goodAudio), true);
     assert.match(res.headers['content-type'] as string, /audio\/mp4/);
   } finally {
     await app.close();
@@ -310,7 +313,7 @@ test('GET /api/validation/next — inclut audioUrl pour un clip en peer_review',
   const { app, token, repo, dir } = await setup();
   try {
     // Alice soumet ; Bob (validateur) reçoit le clip à valider.
-    const mp = multipart(goodFields, { field: 'audio', filename: 'c.m4a', contentType: 'audio/mp4', data: Buffer.from('AUDIODATA') });
+    const mp = multipart(goodFields, { field: 'audio', filename: 'c.m4a', contentType: 'audio/mp4', data: goodAudio });
     await app.inject({
       method: 'POST', url: '/api/clips',
       headers: { authorization: `Bearer ${token}`, 'content-type': mp.contentType },
