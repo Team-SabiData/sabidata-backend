@@ -32,11 +32,12 @@ test('assertProdSecurity — config prod complète : ne lève pas', () => {
   assert.doesNotThrow(() => assertProdSecurity(okProd));
 });
 
-test('assertProdSecurity — staging sans SMS : ne lève pas si JWT+DB+S3 OK', () => {
+test('assertProdSecurity — staging sans SMS ni S3 : ne lève pas si JWT+DB OK', () => {
   assert.doesNotThrow(() =>
     assertProdSecurity({
       ...okProd,
       SMS_ENABLED: 'false',
+      S3_BUCKET: undefined,
       STAGING: 'true',
     }),
   );

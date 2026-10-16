@@ -28,7 +28,8 @@ export function assertProdSecurity(env: Env = process.env): void {
   if (!env.DATABASE_URL) {
     problems.push('DATABASE_URL manquant (Postgres managé requis en production)');
   }
-  if (!env.S3_BUCKET) {
+  // S3/R2 obligatoire en prod publique ; en STAGING on tolère le filesystem (volume).
+  if (!env.S3_BUCKET && !isStaging(env)) {
     problems.push('S3_BUCKET manquant (stockage objet R2/S3 requis en production)');
   }
   // Sans ceci, generateOtp() renvoie « 0000 » → toute prise de compte par OTP.
