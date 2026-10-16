@@ -77,6 +77,7 @@ export interface Repo {
   listLanguages(): Promise<LanguageRow[]>;
   listDialects(languageCode?: string): Promise<DialectRow[]>;
   listActivePrompts(languageCode?: string): Promise<PromptRow[]>;
+  getPromptByStableId(stableId: string): Promise<PromptRow | null>;
 
   createVote(v: Omit<Vote, 'id' | 'createdAt'>): Promise<Vote>;
   hasVotedClip(clipId: string, validatorId: string): Promise<boolean>;
@@ -249,6 +250,9 @@ export class InMemoryRepo implements Repo {
   }
   async listActivePrompts(languageCode?: string) {
     return this.prompts.filter((p) => (languageCode ? p.languageCode === languageCode : true));
+  }
+  async getPromptByStableId(stableId: string) {
+    return this.prompts.find((p) => p.stableId === stableId) ?? null;
   }
   /** Seed mémoire pour tests (optionnel). */
   seedReferential(data: { languages: LanguageRow[]; dialects: DialectRow[]; prompts: PromptRow[] }) {

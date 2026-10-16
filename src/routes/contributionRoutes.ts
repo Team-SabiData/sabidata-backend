@@ -93,11 +93,13 @@ export async function contributionRoutes(
     try {
       const clip = await svc.nextForValidation(p);
       if (!clip) return reply.code(204).send();
+      const meta = await svc.promptMetaForClip(clip);
       return reply.send({
         clipId: clip.id,
         durationS: clip.durationS,
         requiredCompetence: clip.requiredCompetence,
         audioUrl: `/api/clips/${clip.id}/audio`,
+        ...meta,
       });
     } catch (e) {
       return fail(reply, e);
@@ -123,10 +125,12 @@ export async function contributionRoutes(
     try {
       const clip = await svc.nextForTranscription(p);
       if (!clip) return reply.code(204).send();
+      const meta = await svc.promptMetaForClip(clip);
       return reply.send({
         clipId: clip.id,
         durationS: clip.durationS,
         audioUrl: `/api/clips/${clip.id}/audio`,
+        ...meta,
       });
     } catch (e) {
       return fail(reply, e);

@@ -33,6 +33,26 @@ export class ContributionService {
     return this.repo.getClip(id);
   }
 
+  /** Métadonnées prompt pour validation / transcription (texte à juger). */
+  async promptMetaForClip(clip: Clip): Promise<{
+    promptId?: string;
+    promptText?: string;
+    language?: string;
+    dialect?: string;
+  }> {
+    let promptText: string | undefined;
+    if (clip.promptId) {
+      const p = await this.repo.getPromptByStableId(clip.promptId);
+      promptText = p?.text;
+    }
+    return {
+      promptId: clip.promptId,
+      promptText,
+      language: clip.language,
+      dialect: clip.dialect,
+    };
+  }
+
   /** ACL lecture audio — anti-scraping corpus. */
   async canReadAudio(p: Principal, clip: Clip): Promise<boolean> {
     if (can(p, 'content.read_any')) return true;

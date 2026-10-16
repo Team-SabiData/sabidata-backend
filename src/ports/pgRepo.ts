@@ -209,6 +209,28 @@ export class PgRepo implements Repo {
       writingSystem: r.writing_system,
     }));
   }
+  async getPromptByStableId(stableId: string): Promise<PromptRow | null> {
+    const r = await this.one<{
+      id: string; stable_id: string; language_code: string; dialect_code: string | null;
+      text: string; writing_system: string;
+    }>(
+      `SELECT p.id, p.stable_id, l.code AS language_code, d.code AS dialect_code, p.text, p.writing_system
+       FROM prompts p
+       JOIN languages l ON l.id = p.language_id
+       LEFT JOIN dialects d ON d.id = p.dialect_id
+       WHERE p.stable_id = $1`,
+      [stableId],
+    );
+    if (!r) return null;
+    return {
+      id: r.id,
+      stableId: r.stable_id,
+      languageCode: r.language_code,
+      dialectCode: r.dialect_code ?? undefined,
+      text: r.text,
+      writingSystem: r.writing_system,
+    };
+  }
 
   // — votes —
   async createVote(v: Omit<Vote, 'id' | 'createdAt'>): Promise<Vote> {
