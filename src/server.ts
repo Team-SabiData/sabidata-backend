@@ -15,6 +15,7 @@ import { GovernanceService } from './services/governanceService';
 import { AdminService } from './services/adminService';
 import { authenticate, requirePerm } from './http/guards';
 import { ForbiddenError, can } from './authz/can';
+import { permissionsFor } from './domain/roles';
 import { HttpError } from './errors';
 import { hashPassword } from './auth/crypto';
 import { currentTotp } from './auth/totp';
@@ -209,9 +210,157 @@ export function buildServer(
         throw e;
       };
 
+      i.get('/me', async (req) => {
+        const p = req.principal!;
+        const user = await repo.findUserById(p.userId);
+        return {
+          id: p.userId,
+          name: user?.name ?? 'Admin',
+          role: p.role,
+          competence: p.competence,
+          permissions: permissionsFor(p.role),
+        };
+      });
+
       i.get('/disputes', { preHandler: requirePerm('dispute.arbitrate') }, async () => {
         const clips = await repo.listClipsByStatus('disputed');
-        return { disputes: clips.map((c) => ({ id: c.id, durationS: c.durationS, rarity: c.rarity })) };
+        const disputes = [];
+        for (const c of clips) {
+          const meta = await contributions.promptMetaForClip(c);
+          const votes = await repo.votesForClip(c.id);
+          const contributor = await repo.findUserById(c.contributorId);
+          disputes.push({
+            id: c.id,
+            durationS: c.durationS,
+            rarity: c.rarity,
+            language: c.language,
+            dialect: c.dialect,
+            region: c.region,
+            audioQuality: c.audioQuality,
+            promptId: meta.promptId,
+            promptText: meta.promptText,
+            contributor: contributor
+              ? { id: contributor.id, name: contributor.name }
+              : { id: c.contributorId, name: 'Inconnu' },
+            votes: votes.map((v) => ({
+              verdict: v.verdict,
+              validatorId: v.validatorId,
+              competence: v.reviewerCompetence,
+            })),
+          });
+        }
+        return { disputes };
+      });
+
+      i.get('/quality-queue', { preHandler: requirePerm('content.moderate') }, async () => {
+        const clips = await repo.listQualityQueue();
+        const items = [];
+        for (const c of clips) {
+          const meta = await contributions.promptMetaForClip(c);
+          items.push({
+            id: c.id,
+            status: c.status,
+            durationS: c.durationS,
+            audioQuality: c.audioQuality ?? null,
+            silenceRatio: c.silenceRatio ?? null,
+            snrDb: c.snrDb ?? null,
+            language: c.language,
+            dialect: c.dialect,
+            promptText: meta.promptText,
+            contributorId: c.contributorId,
+            createdAt: c.createdAt,
+            autocheck: c.autocheck ?? null,
+          });
+        }
+        return { items };
+      });
+
+      // — Référentiel (admin) —
+      i.get('/languages', { preHandler: requirePerm('reference.manage') }, async () => ({
+        languages: await repo.listLanguages(),
+      }));
+      i.post('/languages', { preHandler: requirePerm('reference.manage') }, async (req, reply) => {
+        const body = (req.body ?? {}) as { code?: string; nameFr?: string; isoBcp47?: string };
+        if (!body.code || !body.nameFr || !body.isoBcp47) {
+          return reply.code(400).send({ error: { code: 'BAD_INPUT', message: 'code, nameFr, isoBcp47 requis' } });
+        }
+        try {
+          const language = await repo.createLanguage({
+            code: body.code, nameFr: body.nameFr, isoBcp47: body.isoBcp47,
+          });
+          await repo.addAudit({
+            actorId: req.principal!.userId, action: 'reference.language.create',
+            entityType: 'language', entityId: language.id, reason: 'create',
+            metadata: { code: language.code },
+          });
+          return reply.code(201).send({ language });
+        } catch (e) {
+          return sendErr(reply, e);
+        }
+      });
+      i.get('/dialects', { preHandler: requirePerm('reference.manage') }, async (req) => {
+        const lang = ((req.query as Record<string, string>).lang ?? '').trim() || undefined;
+        return { dialects: await repo.listDialects(lang) };
+      });
+      i.post('/dialects', { preHandler: requirePerm('reference.manage') }, async (req, reply) => {
+        const body = (req.body ?? {}) as {
+          languageCode?: string; code?: string; nameFr?: string; zone?: string; targetHours?: number;
+        };
+        if (!body.languageCode || !body.code || !body.nameFr) {
+          return reply.code(400).send({ error: { code: 'BAD_INPUT', message: 'languageCode, code, nameFr requis' } });
+        }
+        try {
+          const dialect = await repo.createDialect({
+            languageCode: body.languageCode, code: body.code, nameFr: body.nameFr,
+            zone: body.zone, targetHours: body.targetHours,
+          });
+          await repo.addAudit({
+            actorId: req.principal!.userId, action: 'reference.dialect.create',
+            entityType: 'dialect', entityId: dialect.id, reason: 'create',
+          });
+          return reply.code(201).send({ dialect });
+        } catch (e) {
+          return reply.code(400).send({ error: { code: 'BAD_INPUT', message: String(e) } });
+        }
+      });
+      i.get('/prompts', { preHandler: requirePerm('reference.manage') }, async (req) => {
+        const lang = ((req.query as Record<string, string>).lang ?? '').trim() || undefined;
+        return { prompts: await repo.listActivePrompts(lang) };
+      });
+      i.post('/prompts', { preHandler: requirePerm('reference.manage') }, async (req, reply) => {
+        const body = (req.body ?? {}) as {
+          stableId?: string; languageCode?: string; dialectCode?: string; text?: string;
+        };
+        if (!body.stableId || !body.languageCode || !body.text) {
+          return reply.code(400).send({ error: { code: 'BAD_INPUT', message: 'stableId, languageCode, text requis' } });
+        }
+        try {
+          const prompt = await repo.createPrompt({
+            stableId: body.stableId, languageCode: body.languageCode,
+            dialectCode: body.dialectCode, text: body.text,
+          });
+          await repo.addAudit({
+            actorId: req.principal!.userId, action: 'reference.prompt.create',
+            entityType: 'prompt', entityId: prompt.stableId, reason: 'create',
+          });
+          return reply.code(201).send({ prompt });
+        } catch (e) {
+          return reply.code(400).send({ error: { code: 'BAD_INPUT', message: String(e) } });
+        }
+      });
+      i.patch('/prompts/:stableId', { preHandler: requirePerm('reference.manage') }, async (req, reply) => {
+        const { stableId } = req.params as { stableId: string };
+        const body = (req.body ?? {}) as { active?: boolean };
+        if (typeof body.active !== 'boolean') {
+          return reply.code(400).send({ error: { code: 'BAD_INPUT', message: 'active boolean requis' } });
+        }
+        const prompt = await repo.setPromptActive(stableId, body.active);
+        if (!prompt && body.active) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'prompt' } });
+        await repo.addAudit({
+          actorId: req.principal!.userId, action: 'reference.prompt.active',
+          entityType: 'prompt', entityId: stableId, reason: body.active ? 'activate' : 'deactivate',
+        });
+        return { ok: true, stableId, active: body.active };
       });
 
       // Arbitrage d'un litige — résout disputed→validated|rejected, journalisé.
@@ -236,9 +385,10 @@ export function buildServer(
         const { id } = req.params as { id: string };
         const clip = await contributions.getClip(id);
         if (!clip || !clip.audioPath) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'audio' } });
-        const stream = await audioStore.openRead(clip.audioPath);
+        const path = clip.audioMasterPath ?? clip.audioPath;
+        const stream = await audioStore.openRead(path);
         if (!stream) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'audio' } });
-        const ext = clip.audioPath.split('.').pop() ?? '';
+        const ext = path.split('.').pop() ?? '';
         return reply.type(mimeFromExt(ext)).send(stream);
       });
 

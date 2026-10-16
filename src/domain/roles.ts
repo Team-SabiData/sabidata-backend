@@ -39,5 +39,18 @@ export function roleHas(role: Role, perm: Permission): boolean {
   return set.has('*') || set.has(perm);
 }
 
+const ALL_PERMISSIONS: Permission[] = [
+  'contribute', 'validate', 'content.read_any', 'content.moderate', 'dispute.arbitrate',
+  'reference.manage', 'user.manage', 'wallet.read', 'wallet.adjust', 'withdrawal.settle',
+  'audit.read', 'export.run',
+];
+
+/** Liste des permissions effectives d'un rôle (pour /admin/me). */
+export function permissionsFor(role: Role): Permission[] {
+  const set = ROLE_PERMISSIONS[role];
+  if (set.has('*')) return [...ALL_PERMISSIONS];
+  return ALL_PERMISSIONS.filter((p) => set.has(p));
+}
+
 // Niveau de compétence ordinal (orthogonal au rôle).
 export type CompetenceLevel = 0 | 1 | 2 | 3;

@@ -231,6 +231,80 @@ export class PgRepo implements Repo {
       writingSystem: r.writing_system,
     };
   }
+  async listQualityQueue(): Promise<Clip[]> {
+    return (
+      await this.many<ClipRow>(
+        `SELECT * FROM clips
+         WHERE status = 'rejected' OR audio_quality = 'F'
+         ORDER BY created_at DESC
+         LIMIT 200`,
+      )
+    ).map((r) => this.mapClip(r)!);
+  }
+  async createLanguage(input: { code: string; nameFr: string; isoBcp47: string }): Promise<LanguageRow> {
+    const r = await this.one<{ id: string; code: string; name_fr: string; iso_bcp47: string; status: string }>(
+      `INSERT INTO languages (code, name_fr, iso_bcp47, status)
+       VALUES ($1,$2,$3,'active') RETURNING id, code, name_fr, iso_bcp47, status`,
+      [input.code, input.nameFr, input.isoBcp47],
+    );
+    return { id: r!.id, code: r!.code, nameFr: r!.name_fr, isoBcp47: r!.iso_bcp47, status: r!.status };
+  }
+  async createDialect(input: {
+    languageCode: string; code: string; nameFr: string; zone?: string; targetHours?: number;
+  }): Promise<DialectRow> {
+    const lang = await this.one<{ id: string }>('SELECT id FROM languages WHERE code = $1', [input.languageCode]);
+    if (!lang) throw new Error('language_not_found');
+    const r = await this.one<{
+      id: string; language_id: string; code: string; name_fr: string; zone: string | null; target_hours: string;
+    }>(
+      `INSERT INTO dialects (language_id, code, name_fr, zone, target_hours)
+       VALUES ($1,$2,$3,$4,$5)
+       RETURNING id, language_id, code, name_fr, zone, target_hours::text`,
+      [lang.id, input.code, input.nameFr, input.zone ?? null, input.targetHours ?? 0],
+    );
+    return {
+      id: r!.id,
+      languageId: r!.language_id,
+      languageCode: input.languageCode,
+      code: r!.code,
+      nameFr: r!.name_fr,
+      zone: r!.zone ?? undefined,
+      targetHours: Number(r!.target_hours),
+    };
+  }
+  async createPrompt(input: {
+    stableId: string; languageCode: string; dialectCode?: string; text: string;
+  }): Promise<PromptRow> {
+    const lang = await this.one<{ id: string }>('SELECT id FROM languages WHERE code = $1', [input.languageCode]);
+    if (!lang) throw new Error('language_not_found');
+    let dialectId: string | null = null;
+    if (input.dialectCode) {
+      const d = await this.one<{ id: string }>(
+        `SELECT d.id FROM dialects d JOIN languages l ON l.id = d.language_id
+         WHERE l.code = $1 AND d.code = $2`,
+        [input.languageCode, input.dialectCode],
+      );
+      dialectId = d?.id ?? null;
+    }
+    const r = await this.one<{ id: string; stable_id: string; text: string; writing_system: string }>(
+      `INSERT INTO prompts (stable_id, language_id, dialect_id, text, writing_system, active)
+       VALUES ($1,$2,$3,$4,'std',true)
+       RETURNING id, stable_id, text, writing_system`,
+      [input.stableId, lang.id, dialectId, input.text],
+    );
+    return {
+      id: r!.id,
+      stableId: r!.stable_id,
+      languageCode: input.languageCode,
+      dialectCode: input.dialectCode,
+      text: r!.text,
+      writingSystem: r!.writing_system,
+    };
+  }
+  async setPromptActive(stableId: string, active: boolean): Promise<PromptRow | null> {
+    await this.db.query(`UPDATE prompts SET active = $2 WHERE stable_id = $1`, [stableId, active]);
+    return this.getPromptByStableId(stableId);
+  }
 
   // — votes —
   async createVote(v: Omit<Vote, 'id' | 'createdAt'>): Promise<Vote> {

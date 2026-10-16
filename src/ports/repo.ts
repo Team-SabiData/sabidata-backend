@@ -78,6 +78,15 @@ export interface Repo {
   listDialects(languageCode?: string): Promise<DialectRow[]>;
   listActivePrompts(languageCode?: string): Promise<PromptRow[]>;
   getPromptByStableId(stableId: string): Promise<PromptRow | null>;
+  listQualityQueue(): Promise<Clip[]>;
+  createLanguage(input: { code: string; nameFr: string; isoBcp47: string }): Promise<LanguageRow>;
+  createDialect(input: {
+    languageCode: string; code: string; nameFr: string; zone?: string; targetHours?: number;
+  }): Promise<DialectRow>;
+  createPrompt(input: {
+    stableId: string; languageCode: string; dialectCode?: string; text: string;
+  }): Promise<PromptRow>;
+  setPromptActive(stableId: string, active: boolean): Promise<PromptRow | null>;
 
   createVote(v: Omit<Vote, 'id' | 'createdAt'>): Promise<Vote>;
   hasVotedClip(clipId: string, validatorId: string): Promise<boolean>;
@@ -253,6 +262,53 @@ export class InMemoryRepo implements Repo {
   }
   async getPromptByStableId(stableId: string) {
     return this.prompts.find((p) => p.stableId === stableId) ?? null;
+  }
+  async listQualityQueue() {
+    return this.clips.filter((c) => c.status === 'rejected' || c.audioQuality === 'F');
+  }
+  async createLanguage(input: { code: string; nameFr: string; isoBcp47: string }) {
+    const row: LanguageRow = {
+      id: this.id('lang'), code: input.code, nameFr: input.nameFr, isoBcp47: input.isoBcp47, status: 'active',
+    };
+    this.languages.push(row);
+    return row;
+  }
+  async createDialect(input: {
+    languageCode: string; code: string; nameFr: string; zone?: string; targetHours?: number;
+  }) {
+    const lang = this.languages.find((l) => l.code === input.languageCode);
+    if (!lang) throw new Error('language_not_found');
+    const row: DialectRow = {
+      id: this.id('dia'),
+      languageId: lang.id,
+      languageCode: lang.code,
+      code: input.code,
+      nameFr: input.nameFr,
+      zone: input.zone,
+      targetHours: input.targetHours ?? 0,
+    };
+    this.dialects.push(row);
+    return row;
+  }
+  async createPrompt(input: {
+    stableId: string; languageCode: string; dialectCode?: string; text: string;
+  }) {
+    const row: PromptRow = {
+      id: this.id('prm'),
+      stableId: input.stableId,
+      languageCode: input.languageCode,
+      dialectCode: input.dialectCode,
+      text: input.text,
+      writingSystem: 'std',
+    };
+    this.prompts.push(row);
+    return row;
+  }
+  async setPromptActive(stableId: string, active: boolean) {
+    const p = this.prompts.find((x) => x.stableId === stableId);
+    if (!p) return null;
+    if (!active) this.prompts = this.prompts.filter((x) => x.stableId !== stableId);
+    return p;
   }
   /** Seed mémoire pour tests (optionnel). */
   seedReferential(data: { languages: LanguageRow[]; dialects: DialectRow[]; prompts: PromptRow[] }) {
