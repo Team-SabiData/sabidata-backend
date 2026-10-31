@@ -6,3 +6,9 @@ dist/
 # Blobs audio stockés localement (dev)
 var/
 .local/
+
+# Documentation interne — gardée en local, hors suivi GitHub
+API_CONTRACT.md
+HANDOFF_INTEGRATION.md
+DEPLOY.md
+STAGING.md
