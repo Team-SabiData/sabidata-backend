@@ -42,6 +42,15 @@ test('InMemoryAudioStore — round-trip', async () => {
   assert.deepEqual(await readAll(store, path), buf);
 });
 
+test('AudioStore.delete — purge le blob et reste idempotent', async () => {
+  const store = new InMemoryAudioStore();
+  const path = await store.save('c', Buffer.from('X'), 'wav');
+  assert.ok(await store.openRead(path));
+  await store.delete(path);
+  assert.equal(await store.openRead(path), null);
+  await store.delete(path);
+});
+
 test('mime helpers — mapping connu et rejet inconnu', () => {
   assert.equal(extFromMime('audio/mpeg'), 'mp3');
   assert.equal(extFromMime('image/png'), null);

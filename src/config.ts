@@ -1,13 +1,24 @@
 // Constantes gelées D1–D4 (miroir de la table app_config du schéma).
 // Modifiables sans toucher la logique.
+import { RBAC_VERSION } from './domain/roles';
+
 export const CONFIG = {
-  pointToFcfa: 5, // D4 : 1 pt = 5 FCFA
-  rewards: { record: 50, validate: 20, transcribe: 80, convert: 120, dailyTaskBonus: 250 },
-  rarityMult: { 0: 1, 1: 2, 2: 3 } as Record<number, number>, // ×pts enregistrement
+  // Compatibilité clients / contrat d'API.
+  apiVersion: 'v1',
+  rbacVersion: RBAC_VERSION,
+
+  // Conversion : uniquement les points gagnés APRÈS le niveau OR.
+  pointToFcfa: 0.15,
+  rewards: {
+    recordByQuality: { A: 10, B: 5, C: 1, F: 0 } as Record<string, number>,
+    validationBonus: 15,
+    validate: 0,
+    transcribe: 0,
+  },
   withdrawMinFcfa: 500,
-  // Niveaux gamifiés — dérivés du nombre de contributions validées.
-  levels: { argentAt: 50, orAt: 200 },
-  withdrawMinLevel: 'argent' as const, // retrait verrouillé sous ce niveau
+  // Niveaux dérivés des points cumulés GAGNÉS (pas du solde).
+  levels: { bronzeAt: 500, argentAt: 1500, orAt: 4500 },
+  withdrawMinLevel: 'or' as const, // conversion FCFA verrouillée sous OR
 
   // D3 — consensus
   votesMin: 2,

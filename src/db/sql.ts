@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { SEED_DIALECTS, SEED_LANGUAGES, SEED_PROMPTS } from './referentialSeed';
+import { migrate } from './migrate';
 
 // Interface minimale commune à PGlite et au Pool `pg` (via createPgDb) :
 // PgRepo et ensureSchema ne dépendent que de ça.
@@ -20,6 +21,7 @@ export async function ensureSchema(db: SqlDb): Promise<void> {
     await db.exec(schema);
   }
   await ensureMigrations(db);
+  await migrate(db);
 }
 
 /** Migrations idempotentes pour bases déjà provisionnées (Railway). */

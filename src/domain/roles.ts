@@ -1,10 +1,13 @@
 // Décision 1 — RBAC : enum rôle (accès grossier) + competence_level ordinal.
 
+export const RBAC_VERSION = 2;
+
 export const ROLES = ['contributor', 'validator', 'moderator', 'admin'] as const;
 export type Role = (typeof ROLES)[number];
 
 export type Permission =
   | 'contribute'
+  | 'transcribe'
   | 'validate'
   | 'content.read_any'
   | 'content.moderate'
@@ -15,21 +18,23 @@ export type Permission =
   | 'wallet.adjust'
   | 'withdrawal.settle'
   | 'audit.read'
-  | 'export.run';
+  | 'export.run'
+  | 'support.manage';
 
 // SOURCE UNIQUE rôle -> droits (miroir de la table role_permissions).
 // '*' = tout (admin). competence_level n'est PAS ici : c'est de la donnée de
 // routage de contenu, pas un droit d'accès.
 const ROLE_PERMISSIONS: Record<Role, ReadonlySet<Permission | '*'>> = {
-  // Validation ouverte à tous les contributeurs (peer-review) ; le routage par
-  // compétence réserve les clips rares aux validateurs plus qualifiés.
-  contributor: new Set(['contribute', 'validate']),
-  validator: new Set(['contribute', 'validate']),
+  // Séparation stricte : le contributeur enregistre et transcrit, le validateur
+  // valide uniquement. Seul un admin peut promouvoir un compte en validateur.
+  contributor: new Set(['contribute', 'transcribe']),
+  validator: new Set(['validate']),
   moderator: new Set([
     'validate',
     'content.read_any',
     'content.moderate',
     'dispute.arbitrate',
+    'support.manage',
   ]),
   admin: new Set(['*']),
 };
@@ -40,9 +45,9 @@ export function roleHas(role: Role, perm: Permission): boolean {
 }
 
 const ALL_PERMISSIONS: Permission[] = [
-  'contribute', 'validate', 'content.read_any', 'content.moderate', 'dispute.arbitrate',
+  'contribute', 'transcribe', 'validate', 'content.read_any', 'content.moderate', 'dispute.arbitrate',
   'reference.manage', 'user.manage', 'wallet.read', 'wallet.adjust', 'withdrawal.settle',
-  'audit.read', 'export.run',
+  'audit.read', 'export.run', 'support.manage',
 ];
 
 /** Liste des permissions effectives d'un rôle (pour /admin/me). */

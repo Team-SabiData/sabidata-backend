@@ -94,6 +94,24 @@ export class AdminService {
     return { id: user.id, name: user.name, role: user.role };
   }
 
+  // Reset par un admin : nouveau hash + révocation immédiate de toutes les
+  // sessions (token_version). Le mot de passe en clair n'est jamais journalisé.
+  async resetPassword(p: Principal, id: string, password: string, reason: string) {
+    requirePermission(p, 'user.manage');
+    const r = this.needReason(reason);
+    if (typeof password !== 'string' || password.length < 6) throw badRequest('WEAK_PASSWORD');
+    const target = await this.repo.findUserById(id);
+    if (!target) throw notFound('user');
+    if ((target.status ?? 'active') === 'deleted') throw conflict('USER_DELETED');
+    await this.repo.updateUser(id, { passwordHash: hashPassword(password) });
+    await this.repo.bumpTokenVersion(id);
+    await this.repo.addAudit({
+      actorId: p.userId, action: 'user.password_reset', entityType: 'user', entityId: id,
+      reason: r, metadata: { sessionsRevoked: true },
+    });
+    return { id, passwordReset: true, sessionsRevoked: true };
+  }
+
   async deleteUser(p: Principal, id: string, reason: string) {
     requirePermission(p, 'user.manage');
     const r = this.needReason(reason);

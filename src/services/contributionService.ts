@@ -1,5 +1,5 @@
 import { CONFIG } from '../config';
-import { type Principal, can, canHandleContent, ForbiddenError } from '../authz/can';
+import { type Principal, can, canHandleContent, ForbiddenError, requirePermission } from '../authz/can';
 import { autocheck, consensusNext, canTransition, type ClipState } from '../curation/stateMachine';
 import { computeTier, type WritingSystem } from '../curation/tier';
 import { type Repo } from '../ports/repo';
@@ -152,7 +152,6 @@ export class ContributionService {
       language,
       dialect,
       region,
-      classroomId: contributor?.classroomId,
       clientUuid: input.clientUuid,
       status,
       consent,
@@ -186,7 +185,10 @@ export class ContributionService {
 
     let reward = 0;
     if (status === 'peer_review') {
-      reward = CONFIG.rewards.record * (CONFIG.rarityMult[rarity] ?? 1);
+      // Barème qualité audio (A=10, B=5, C=1, F/rejet=0). Sans audio, on
+      // applique le barème « mauvaise qualité » (C).
+      const quality = mediaResult?.quality ?? 'C';
+      reward = CONFIG.rewards.recordByQuality[quality] ?? 0;
       await this.repo.addLedger({
         userId: contributorId,
         delta: reward,
@@ -243,13 +245,6 @@ export class ContributionService {
     if (await this.repo.hasVotedClip(clipId, p.userId)) throw conflict('already_voted');
 
     await this.repo.createVote({ clipId, validatorId: p.userId, verdict, reviewerCompetence: p.competence });
-    await this.repo.addLedger({
-      userId: p.userId,
-      delta: CONFIG.rewards.validate,
-      reason: 'validate',
-      state: 'confirmed',
-      refClipId: clipId,
-    });
 
     const votes = await this.repo.votesForClip(clipId);
     const tally = {
@@ -257,16 +252,54 @@ export class ContributionService {
       problem: votes.filter((v) => v.verdict === 'problem').length,
       total: votes.length,
     };
-    const next = consensusNext('peer_review', tally);
+    // Rejet qualité strict : 2 signalements « problem » suffisent, même si le
+    // consensus net serait encore en litige.
+    const next = tally.problem >= 2 ? 'rejected' : consensusNext('peer_review', tally);
+    await this.repo.setClipModeration(clipId, { rejectionCount: tally.problem });
     if (next !== clip.status && canTransition(clip.status, next)) {
       await this.repo.setClipStatus(clipId, next);
-      if (next === 'validated') await this.repo.setRecordLedgerState(clipId, 'confirmed');
-      else if (next === 'rejected') await this.repo.setRecordLedgerState(clipId, 'reversed');
+      if (next === 'validated') {
+        await this.repo.setRecordLedgerState(clipId, 'confirmed');
+        // Bonus de validation audio (+15), crédité au contributeur.
+        await this.repo.addLedger({
+          userId: clip.contributorId,
+          delta: CONFIG.rewards.validationBonus,
+          reason: 'record',
+          state: 'confirmed',
+          refClipId: clipId,
+        });
+      } else if (next === 'rejected') {
+        await this.repo.setRecordLedgerState(clipId, 'reversed');
+        await this.repo.setClipModeration(clipId, { deletedAt: new Date() });
+        await this.purgeClipAudio(clip);
+        await this.repo.addAudit({
+          actorId: p.userId,
+          action: 'clip.reject',
+          entityType: 'clip',
+          entityId: clipId,
+          reason: '2 signalements problem',
+          metadata: { problemVotes: tally.problem, totalVotes: tally.total, audioPurged: true },
+        });
+      }
     }
-    return { status: next, reward: CONFIG.rewards.validate };
+    return { status: next, reward: 0 };
+  }
+
+  /** Purge définitive des blobs audio après rejet qualité. */
+  private async purgeClipAudio(clip: Clip): Promise<void> {
+    const paths = [
+      clip.audioPath,
+      clip.audioIngestPath,
+      clip.audioMasterPath,
+    ].filter((p): p is string => Boolean(p));
+    for (const path of new Set(paths)) {
+      await this.audioStore.delete(path);
+    }
+    await this.repo.clearClipAudio(clip.id);
   }
 
   async nextForTranscription(p: Principal): Promise<Clip | null> {
+    requirePermission(p, 'transcribe');
     const me = (await this.repo.findUserById(p.userId)) ?? {};
     const candidates = await this.repo.listClipsByStatus('validated');
     for (const c of candidates) {
@@ -282,6 +315,7 @@ export class ContributionService {
     p: Principal,
     input: { clipId?: string; archiveId?: string; text: string; writingSystem: WritingSystem; consistency: number },
   ): Promise<{ id: string; reward: number }> {
+    requirePermission(p, 'transcribe');
     if (!input.clipId && !input.archiveId) throw conflict('target_required');
     if (input.clipId) {
       const clip = await this.repo.getClip(input.clipId);
@@ -301,15 +335,8 @@ export class ContributionService {
       writingSystem: input.writingSystem,
       consistency,
     });
-    const reward = CONFIG.rewards.transcribe;
-    await this.repo.addLedger({
-      userId: p.userId,
-      delta: reward,
-      reason: 'transcribe',
-      state: 'confirmed',
-      refTranscriptionId: tr.id,
-    });
-    return { id: tr.id, reward };
+    // Les transcripteurs ne gagnent pas de points (décision Phase 2).
+    return { id: tr.id, reward: 0 };
   }
 
   async voteTranscription(
@@ -319,6 +346,19 @@ export class ContributionService {
     input: { writingSystem: WritingSystem; consistency: number },
   ): Promise<{ tier: string; matchesAudio: boolean | null }> {
     if (!can(p, 'validate')) throw new ForbiddenError('validate');
+    const tr = await this.repo.getTranscription(transcriptionId);
+    if (!tr) throw notFound('transcription');
+    if (tr.status === 'rejected' || tr.status === 'deleted') throw conflict('transcription_closed');
+    if (tr.authorId === p.userId) throw conflict('own_transcription');
+    if (tr.clipId) {
+      const clip = await this.repo.getClip(tr.clipId);
+      if (!clip) throw notFound('clip');
+      if (clip.status !== 'validated') throw conflict('clip_not_validated');
+      const me = (await this.repo.findUserById(p.userId)) ?? {};
+      if (!sameLinguistic(me, clip)) throw conflict('wrong_language');
+    }
+    const prior = await this.repo.votesForTranscription(transcriptionId);
+    if (prior.some((v) => v.validatorId === p.userId)) throw conflict('already_voted');
     await this.repo.createVote({
       transcriptionId,
       validatorId: p.userId,
@@ -326,16 +366,40 @@ export class ContributionService {
       reviewerCompetence: p.competence,
     });
     const votes = await this.repo.votesForTranscription(transcriptionId);
+    const problem = votes.filter((v) => v.verdict === 'problem').length;
     const result = computeTier({
       writingSystem: input.writingSystem,
       consistency: input.consistency,
       correct: votes.filter((v) => v.verdict === 'correct').length,
-      problem: votes.filter((v) => v.verdict === 'problem').length,
+      problem,
       qualifiedCorrect: votes.filter(
         (v) => v.verdict === 'correct' && v.reviewerCompetence >= CONFIG.competenceForGold,
       ).length,
     });
-    await this.repo.setTranscriptionTier(transcriptionId, result.tier, result.matchesAudio);
+    if (problem >= 2) {
+      await this.repo.setTranscriptionModeration(transcriptionId, {
+        tier: result.tier,
+        matchesAudio: result.matchesAudio,
+        status: 'rejected',
+        rejectionCount: problem,
+        deletedAt: new Date(),
+      });
+      await this.repo.addAudit({
+        actorId: p.userId,
+        action: 'transcription.reject',
+        entityType: 'transcription',
+        entityId: transcriptionId,
+        reason: '2 signalements problem',
+        metadata: { problemVotes: problem, totalVotes: votes.length },
+      });
+    } else {
+      await this.repo.setTranscriptionModeration(transcriptionId, {
+        tier: result.tier,
+        matchesAudio: result.matchesAudio,
+        status: result.tier ? 'validated' : 'pending',
+        rejectionCount: problem,
+      });
+    }
     return { tier: result.tier, matchesAudio: result.matchesAudio };
   }
 }

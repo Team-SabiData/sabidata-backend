@@ -12,6 +12,8 @@ export interface Claims {
   role: Role;
   competence: CompetenceLevel;
   aud: 'mobile' | 'admin';
+  /** Version de session — incrémentée au logout pour révoquer les tokens. */
+  ver?: number;
 }
 
 export function signAccess(claims: Claims, ttl: string): string {
@@ -24,14 +26,20 @@ export function verifyAccess(token: string, audience: 'mobile' | 'admin'): Claim
 
 // Refresh token mobile : longue durée, ne porte que l'identité (le rôle et la
 // compétence à jour sont relus depuis la base au moment du /refresh).
-export function signRefresh(sub: string, ttl: string): string {
-  return jwt.sign({ sub, typ: 'refresh', aud: 'mobile' }, SECRET, { expiresIn: ttl } as jwt.SignOptions);
+export function signRefresh(sub: string, ttl: string, ver = 0): string {
+  return jwt.sign({ sub, typ: 'refresh', aud: 'mobile', ver }, SECRET, {
+    expiresIn: ttl,
+  } as jwt.SignOptions);
 }
 
-export function verifyRefresh(token: string): { sub: string } {
-  const p = jwt.verify(token, SECRET, { audience: 'mobile' }) as { sub: string; typ?: string };
+export function verifyRefresh(token: string): { sub: string; ver?: number } {
+  const p = jwt.verify(token, SECRET, { audience: 'mobile' }) as {
+    sub: string;
+    typ?: string;
+    ver?: number;
+  };
   if (p.typ !== 'refresh') throw new Error('NOT_REFRESH');
-  return { sub: p.sub };
+  return { sub: p.sub, ver: p.ver };
 }
 
 /** Challenge admin post-password : lié à l'identité, TTL court, non forgeable sans JWT_SECRET. */

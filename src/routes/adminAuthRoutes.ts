@@ -56,7 +56,13 @@ export async function adminAuthRoutes(app: FastifyInstance, repo: Repo): Promise
       });
     }
     const access = signAccess(
-      { sub: user.id, role: user.role, competence: user.competence, aud: 'admin' },
+      {
+        sub: user.id,
+        role: user.role,
+        competence: user.competence,
+        aud: 'admin',
+        ver: user.tokenVersion ?? 0,
+      },
       CONFIG.jwt.adminSessionTtl,
     );
     await repo.addAudit({

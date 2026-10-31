@@ -45,84 +45,6 @@ async function setup() {
   return { app, token, repo, store, dir };
 }
 
-test('classroom — création + join par code + stats de groupe', async () => {
-  const repo = new InMemoryRepo();
-  const dir = mkdtempSync(join(tmpdir(), 'sabi-cls-'));
-  const app = buildServer(repo, new FsAudioStore(dir));
-  await app.ready();
-  try {
-    const regA = await app.inject({
-      method: 'POST', url: '/api/auth/register',
-      payload: { name: 'Prof', email: `p${Math.random()}@x.bf`, password: 'secret1' },
-    });
-    const tokA = JSON.parse(regA.body).access as string;
-    const created = await app.inject({
-      method: 'POST', url: '/api/classrooms',
-      headers: { authorization: `Bearer ${tokA}` },
-      payload: { name: 'École Mooré', description: 'Collecte Mooré' },
-    });
-    assert.equal(created.statusCode, 201);
-    const cls = JSON.parse(created.body).classroom;
-    assert.equal(cls.isOwner, true);
-    assert.equal(cls.memberCount, 1);
-    assert.equal((cls.inviteCode as string).length, 6);
-
-    // B rejoint via le code → memberCount 2
-    const regB = await app.inject({
-      method: 'POST', url: '/api/auth/register',
-      payload: { name: 'Élève', email: `e${Math.random()}@x.bf`, password: 'secret1' },
-    });
-    const tokB = JSON.parse(regB.body).access as string;
-    const joined = await app.inject({
-      method: 'POST', url: '/api/classrooms/join',
-      headers: { authorization: `Bearer ${tokB}` }, payload: { code: cls.inviteCode },
-    });
-    assert.equal(joined.statusCode, 200);
-    assert.equal(JSON.parse(joined.body).classroom.memberCount, 2);
-
-    // code invalide → 404
-    const bad = await app.inject({
-      method: 'POST', url: '/api/classrooms/join',
-      headers: { authorization: `Bearer ${tokB}` }, payload: { code: 'ZZZZZZ' },
-    });
-    assert.equal(bad.statusCode, 404);
-
-    // GET mine (B) → son classroom, 2 membres
-    const mine = await app.inject({ method: 'GET', url: '/api/classrooms/mine', headers: { authorization: `Bearer ${tokB}` } });
-    assert.equal(mine.statusCode, 200);
-    assert.equal(JSON.parse(mine.body).classroom.memberCount, 2);
-  } finally {
-    await app.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('classroom join — rate-limit anti-énumération (429 après trop de tentatives)', async () => {
-  const repo = new InMemoryRepo();
-  const dir = mkdtempSync(join(tmpdir(), 'sabi-rl-'));
-  const app = buildServer(repo, new FsAudioStore(dir));
-  await app.ready();
-  try {
-    const reg = await app.inject({
-      method: 'POST', url: '/api/auth/register',
-      payload: { name: 'Xavier', email: `x${Math.random()}@x.bf`, password: 'secret1' },
-    });
-    const tok = JSON.parse(reg.body).access as string;
-    let last = 0;
-    for (let i = 0; i < 10; i++) {
-      const r = await app.inject({
-        method: 'POST', url: '/api/classrooms/join',
-        headers: { authorization: `Bearer ${tok}` }, payload: { code: 'ZZZZZZ' },
-      });
-      last = r.statusCode;
-    }
-    assert.equal(last, 429); // dépasse JOIN_MAX (8) sur la fenêtre
-  } finally {
-    await app.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test('refresh — access renouvelé via refresh token ; refresh invalide → 401', async () => {
   const repo = new InMemoryRepo();
   const dir = mkdtempSync(join(tmpdir(), 'sabi-rt-'));
@@ -343,6 +265,19 @@ test('GET /api/validation/next — inclut audioUrl pour un clip en peer_review',
     assert.equal(res.statusCode, 200);
     const body = JSON.parse(res.body);
     assert.equal(body.audioUrl, `/api/clips/${body.clipId}/audio`);
+  } finally {
+    await app.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('classroom supprimé — les routes /api/classrooms ne sont plus exposées', async () => {
+  const { app, token, dir } = await setup();
+  try {
+    const res = await app.inject({
+      method: 'GET', url: '/api/classrooms/mine', headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(res.statusCode, 404);
   } finally {
     await app.close();
     rmSync(dir, { recursive: true, force: true });

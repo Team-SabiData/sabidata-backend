@@ -13,24 +13,24 @@ const consent = { commercialUse: true, consentVersion: 'v1' };
 test('flux — clip valide (5s) → peer_review + ledger provisoire (rareté serveur)', async () => {
   const repo = new InMemoryRepo();
   const svc = new ContributionService(repo);
-  // Sans région → rareté serveur 0 → reward 50 (client rarity ignorée)
+  // Sans audio → barème qualité C (mauvaise qualité) = 1 point.
   const r = await svc.submitClip('alice', { rarity: 2, durationS: 5, ...consent });
   assert.equal(r.status, 'peer_review');
-  assert.equal(r.reward, 50);
+  assert.equal(r.reward, 1);
   assert.equal(r.licenseTag, 'commercial-v1');
   const ledger = await repo.ledgerFor('alice');
   assert.equal(ledger.length, 1);
   assert.equal(ledger[0]?.state, 'provisional');
 });
 
-test('flux — rareté ×3 si région sous-couverte (serveur)', async () => {
+test('flux — la rareté ne multiplie plus les points', async () => {
   const repo = new InMemoryRepo();
   const svc = new ContributionService(repo);
   const u = await repo.createUser({
     name: 'Awa', role: 'contributor', competence: 0, phoneVerified: true, region: 'Dori',
   });
   const r = await svc.submitClip(u.id, { durationS: 5, region: 'Dori', ...consent });
-  assert.equal(r.reward, 150); // couverture ~0 → rarity 2
+  assert.equal(r.reward, 1); // qualité inconnue → barème C
 });
 
 test('flux — auto-check rejette un clip trop court (0s), aucun crédit', async () => {
@@ -42,13 +42,15 @@ test('flux — auto-check rejette un clip trop court (0s), aucun crédit', async
   assert.equal((await repo.ledgerFor('alice')).length, 0);
 });
 
-test('validation ouverte — un contributeur (competence 0) valide un clip normal', async () => {
+test('validation — un validateur valide un clip normal, un contributeur ne peut pas', async () => {
   const repo = new InMemoryRepo();
   const svc = new ContributionService(repo);
   const { clipId } = await svc.submitClip('alice', { rarity: 0, durationS: 4, ...consent }); // requiredCompetence 0
-  const bob = principal('contributor', 0, 'bob');
+  const contrib = principal('contributor', 0, 'contrib');
+  await assert.rejects(() => svc.nextForValidation(contrib), /forbidden: validate/);
+  const bob = principal('validator', 0, 'bob');
   const next = await svc.nextForValidation(bob);
-  assert.equal(next?.id, clipId); // le clip normal d'alice est proposé au contributeur
+  assert.equal(next?.id, clipId); // le clip normal d'alice est proposé au validateur
   const r = await svc.submitVote(bob, clipId, 'correct'); // et il peut voter (pas de 403)
   assert.ok(r.status); // vote accepté
 });
@@ -62,29 +64,19 @@ test('isolation linguistique — on ne reçoit et ne vote que sa langue/dialecte
 
   // Bob parle Dioula → ne reçoit rien et ne peut pas voter
   const bob = await repo.createUser({
-    name: 'Bob', role: 'contributor', competence: 1, phoneVerified: true, language: 'Dioula', dialect: 'Bobo',
+    name: 'Bob', role: 'validator', competence: 1, phoneVerified: true, language: 'Dioula', dialect: 'Bobo',
   });
-  const bobP = principal('contributor', 1, bob.id);
+  const bobP = principal('validator', 1, bob.id);
   assert.equal(await svc.nextForValidation(bobP), null);
   await assert.rejects(() => svc.submitVote(bobP, clipId, 'correct'), /wrong_language/);
 
   // Carol parle Mooré/Yatenga → reçoit le clip et vote
   const carol = await repo.createUser({
-    name: 'Carol', role: 'contributor', competence: 1, phoneVerified: true, language: 'Mooré', dialect: 'Yatenga',
+    name: 'Carol', role: 'validator', competence: 1, phoneVerified: true, language: 'Mooré', dialect: 'Yatenga',
   });
-  const carolP = principal('contributor', 1, carol.id);
+  const carolP = principal('validator', 1, carol.id);
   assert.equal((await svc.nextForValidation(carolP))?.id, clipId);
   assert.ok((await svc.submitVote(carolP, clipId, 'correct')).status);
-});
-
-test('classroom — le clip soumis est rattaché au classroom du contributeur', async () => {
-  const repo = new InMemoryRepo();
-  const svc = new ContributionService(repo);
-  const cls = await repo.createClassroom({ name: 'Groupe', description: '', ownerId: 'x', inviteCode: 'ABC234' });
-  const u = await repo.createUser({ name: 'Ali', role: 'contributor', competence: 0, phoneVerified: true, classroomId: cls.id });
-  const { clipId } = await svc.submitClip(u.id, { rarity: 0, durationS: 4, ...consent });
-  assert.equal((await repo.getClip(clipId))?.classroomId, cls.id);
-  assert.equal(await repo.countClipsByClassroom(cls.id), 1);
 });
 
 test('transcription — file de clips validés filtrée par langue, pas deux fois', async () => {
@@ -119,10 +111,12 @@ test('flux — 2 validateurs concordants → clip validated + ledger record CONF
   const second = await svc.submitVote(principal('validator', 2, 'carol'), clipId, 'correct');
   assert.equal(second.status, 'validated');
 
-  const recordEntry = (await repo.ledgerFor('alice')).find((e) => e.reason === 'record');
-  assert.equal(recordEntry?.state, 'confirmed'); // D4 : provisoire → confirmé
-  // chaque validateur a touché +20 confirmé
-  assert.equal((await repo.ledgerFor('bob'))[0]?.delta, 20);
+  const entries = await repo.ledgerFor('alice');
+  assert.ok(entries.some((e) => e.reason === 'record' && e.state === 'confirmed'));
+  // bonus de validation audio (+15) crédité au contributeur
+  assert.ok(entries.some((e) => e.reason === 'record' && e.delta === 15 && e.state === 'confirmed'));
+  // les validateurs ne gagnent plus de points
+  assert.equal((await repo.ledgerFor('bob')).length, 0);
 });
 
 test('flux — double vote interdit (idempotence D7)', async () => {
@@ -156,7 +150,7 @@ test('flux — on ne peut pas valider son propre clip', async () => {
 test('flux — transcription std + 2 votes qualifiés → tier OR (D1)', async () => {
   const repo = new InMemoryRepo();
   const svc = new ContributionService(repo);
-  const author = principal('validator', 1, 'alice');
+  const author = principal('contributor', 1, 'alice');
   const { id } = await svc.submitTranscription(author, {
     archiveId: 'arch-1', text: 'kɛɛrɛ', writingSystem: 'std', consistency: 1,
   });

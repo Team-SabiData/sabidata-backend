@@ -37,10 +37,10 @@ test('ledgerHistoryFor : entrées du user, ordre antéchronologique', async () =
 });
 
 test('buildRegionCoverage : fusionne comptes clips et catalogue, pct plafonné', () => {
-  const counts = [{ region: 'Ouagadougou', clips: 500 }, { region: 'Yatenga', clips: 2000 }];
+  const counts = [{ region: 'Ouagadougou', clips: 500 }, { region: 'Ouahigouya', clips: 2000 }];
   const cov = buildRegionCoverage(counts);
   const ouaga = cov.find((r) => r.region === 'Ouagadougou')!;
-  const yat = cov.find((r) => r.region === 'Yatenga')!;
+  const yat = cov.find((r) => r.region === 'Ouahigouya')!;
   const dori = cov.find((r) => r.region === 'Dori')!; // 0 clip → présent via catalogue
   assert.equal(ouaga.coveragePct, 0.5);
   assert.equal(yat.coveragePct, 1);    // 2000/1000 plafonné à 1

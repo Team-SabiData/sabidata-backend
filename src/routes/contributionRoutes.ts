@@ -1,8 +1,8 @@
 import { type FastifyInstance, type FastifyReply } from 'fastify';
 import { ContributionService } from '../services/contributionService';
-import { ClipMultipartReq, VoteReq, TranscriptionReq } from '../contribution/schemas';
+import { ClipMultipartReq, VoteReq, TranscriptionReq, TranscriptionVoteReq } from '../contribution/schemas';
 import { extFromMime, mimeFromExt, type AudioStore } from '../storage/audioStore';
-import { ForbiddenError } from '../authz/can';
+import { can, ForbiddenError } from '../authz/can';
 import { HttpError } from '../errors';
 
 function fail(reply: FastifyReply, e: unknown) {
@@ -20,6 +20,9 @@ export async function contributionRoutes(
   app.post('/clips', async (req, reply) => {
     const p = req.principal;
     if (!p) return reply.code(401).send({ error: { code: 'UNAUTHENTICATED', message: 'token requis' } });
+    if (!can(p, 'contribute')) {
+      return reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'contribute' } });
+    }
 
     const fields: Record<string, string> = {};
     let audioBuffer: Buffer | null = null;
@@ -143,6 +146,24 @@ export async function contributionRoutes(
     const body = TranscriptionReq.parse(req.body);
     try {
       const r = await svc.submitTranscription(p, body);
+      return reply.code(201).send(r);
+    } catch (e) {
+      return fail(reply, e);
+    }
+  });
+
+  // Validation d'une transcription — réservée aux validateurs (pas aux
+  // contributeurs, qui ne peuvent que transcrire).
+  app.post('/transcriptions/:id/validations', async (req, reply) => {
+    const p = req.principal;
+    if (!p) return reply.code(401).send({ error: { code: 'UNAUTHENTICATED', message: 'token requis' } });
+    const { id } = req.params as { id: string };
+    const body = TranscriptionVoteReq.parse(req.body);
+    try {
+      const r = await svc.voteTranscription(p, id, body.verdict, {
+        writingSystem: body.writingSystem,
+        consistency: body.consistency,
+      });
       return reply.code(201).send(r);
     } catch (e) {
       return fail(reply, e);

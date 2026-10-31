@@ -1,5 +1,5 @@
 import { createReadStream, existsSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { type Readable } from 'node:stream';
 
@@ -9,6 +9,8 @@ export interface AudioStore {
   save(clipId: string, buffer: Buffer, ext: string): Promise<string>;
   // Ouvre le blob en lecture ; null si absent.
   openRead(storedPath: string): Promise<Readable | null>;
+  // Purge définitive du blob (rejet qualité) ; idempotent.
+  delete(storedPath: string): Promise<void>;
 }
 
 // Formats audio acceptés (mimetype → extension).
@@ -56,6 +58,11 @@ export class FsAudioStore implements AudioStore {
     if (!existsSync(full)) return null;
     return createReadStream(full);
   }
+
+  async delete(storedPath: string): Promise<void> {
+    assertSafeSegment(storedPath);
+    await rm(join(this.dir, storedPath), { force: true });
+  }
 }
 
 // Implémentation mémoire pour les tests (pas de disque).
@@ -73,5 +80,9 @@ export class InMemoryAudioStore implements AudioStore {
     if (!buf) return null;
     const { Readable } = await import('node:stream');
     return Readable.from(buf);
+  }
+
+  async delete(storedPath: string): Promise<void> {
+    this.blobs.delete(storedPath);
   }
 }

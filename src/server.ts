@@ -8,24 +8,42 @@ import { CONFIG } from './config';
 import { authRoutes } from './routes/authRoutes';
 import { adminAuthRoutes } from './routes/adminAuthRoutes';
 import { contributionRoutes } from './routes/contributionRoutes';
-import { classroomRoutes } from './routes/classroomRoutes';
+import { supportRoutes, adminSupportRoutes } from './routes/supportRoutes';
 import { ContributionService } from './services/contributionService';
 import { WalletService } from './services/walletService';
 import { GovernanceService } from './services/governanceService';
 import { AdminService } from './services/adminService';
 import { DatasetExportService } from './services/datasetExportService';
+import { SupportService } from './services/supportService';
+import { QualityService } from './services/qualityService';
+import { ReferentialService } from './services/referentialService';
 import { authenticate, requirePerm } from './http/guards';
+import { enforceAppVersion, minAppVersion } from './http/appVersion';
 import { ForbiddenError, can } from './authz/can';
 import { permissionsFor } from './domain/roles';
 import { HttpError } from './errors';
 import { hashPassword } from './auth/crypto';
 import { currentTotp } from './auth/totp';
-import { ProfileReq, isProfileComplete } from './mobile/profileSchema';
+import { hashOtp, otpMatches } from './auth/otp';
+import {
+  ProfileReq,
+  ProfilePatchReq,
+  ContactChangeReq,
+  ContactConfirmReq,
+  isProfileComplete,
+} from './mobile/profileSchema';
+import { generateOtp, sendOtpSms } from './services/sms';
+import { checkRateLimit } from './http/rateLimit';
 import { langMatches } from './mobile/langMatch';
 import { assertProdSecurity, isProduction } from './config/prodGuard';
 import { buildRegionCoverage } from './mobile/regionCoverage';
 import { type MediaProcessor, StubMediaProcessor, FfmpegMediaProcessor, ffmpegAvailable } from './media/processor';
 import { SEED_PROMPTS } from './db/referentialSeed';
+
+function maskPhone(phone: string): string {
+  const digits = phone.replace(/\s+/g, '');
+  return digits.length <= 4 ? '****' : `${digits.slice(0, 3)}****${digits.slice(-2)}`;
+}
 
 function corsOrigins(): boolean | string[] {
   const raw = process.env.CORS_ORIGINS?.trim();
@@ -49,6 +67,25 @@ export function buildServer(
 
   app.get('/health', async () => ({ ok: true, service: 'sabidata-backend' }));
 
+  app.addHook('onRequest', async (req, reply) => {
+    const path = (req.raw.url ?? '').split('?')[0] ?? '';
+    if (path.startsWith('/api/') && path !== '/api/config') {
+      await enforceAppVersion(req, reply);
+    }
+  });
+
+  // Contrat de compatibilité public : consultable même par une version obsolète.
+  app.get('/api/config', async () => ({
+    apiVersion: CONFIG.apiVersion,
+    rbacVersion: CONFIG.rbacVersion,
+    minAppVersion: minAppVersion() || null,
+    features: {
+      supportChat: true,
+      qualityAdmin: true,
+      datasetCatalog: true,
+    },
+  }));
+
   // Auth mobile
   app.register((i) => authRoutes(i, repo), { prefix: '/api/auth' });
   // Auth admin (2FA)
@@ -57,6 +94,8 @@ export function buildServer(
   // Surface MOBILE protégée : /me + portefeuille + flux de contribution.
   const contributions = new ContributionService(repo, audioStore, media);
   const wallet = new WalletService(repo);
+  const support = new SupportService(repo);
+  const quality = new QualityService(repo);
 
   const fallbackPrompts = SEED_PROMPTS.map((p) => ({
     id: p.id,
@@ -77,8 +116,13 @@ export function buildServer(
           id:          uid,
           name:        user?.name        ?? 'Contributeur',
           role:        req.principal?.role,
+          permissions: permissionsFor(req.principal!.role),
+          rbacVersion: CONFIG.rbacVersion,
           competence:  req.principal?.competence ?? 0,
           points:      w.pointsTotal,
+          pointsEarned: w.pointsEarned,
+          pointsConvertible: w.pointsConvertible,
+          balanceFcfa: w.balanceFcfa,
           contributionsValidated: w.contributionsValidated,
           level:       w.level,
           email:       user?.email ?? null,
@@ -89,6 +133,7 @@ export function buildServer(
           region:       user?.region,
           commercialConsent: user?.commercialConsent ?? false,
           profileComplete: isProfileComplete(user ?? {}),
+          profileLocked: isProfileComplete(user ?? {}),
         };
       });
 
@@ -103,7 +148,30 @@ export function buildServer(
           }
           throw e;
         }
-        const updated = await repo.updateUser(req.principal!.userId, body);
+        const uid = req.principal!.userId;
+        const user = await repo.findUserById(uid);
+        if (!user) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'utilisateur' } });
+
+        // Langue/dialecte/région verrouillés après l'onboarding : seul un
+        // administrateur peut les modifier (via /admin). On autorise un envoi
+        // identique (le mobile renvoie tout le profil), mais aucun changement.
+        if (isProfileComplete(user)) {
+          const locked =
+            body.language !== user.language ||
+            body.dialect !== user.dialect ||
+            body.region !== user.region;
+          if (locked) {
+            return reply.code(409).send({
+              error: { code: 'PROFILE_LOCKED', message: 'langue, dialecte et région sont verrouillés' },
+            });
+          }
+        }
+
+        const updated = await repo.updateUser(uid, body);
+        await repo.addAudit({
+          actorId: uid, action: 'profile.update', entityType: 'user', entityId: uid,
+          reason: '', metadata: {},
+        });
         return reply.code(200).send({
           language: updated?.language,
           dialect: updated?.dialect,
@@ -111,6 +179,129 @@ export function buildServer(
           commercialConsent: updated?.commercialConsent ?? false,
           profileComplete: isProfileComplete(updated ?? {}),
         });
+      });
+
+      // Modification du nom (email/téléphone passent par le flow OTP ci-dessous).
+      i.patch('/me', async (req, reply) => {
+        let body: ReturnType<typeof ProfilePatchReq.parse>;
+        try {
+          body = ProfilePatchReq.parse(req.body);
+        } catch (e) {
+          if (e instanceof ZodError) {
+            const msg = e.issues[0]?.message ?? 'données invalides';
+            return reply.code(400).send({ error: { code: 'BAD_INPUT', message: msg } });
+          }
+          throw e;
+        }
+        const uid = req.principal!.userId;
+        const updated = await repo.updateUser(uid, { name: body.name });
+        if (!updated) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'utilisateur' } });
+        await repo.addAudit({
+          actorId: uid, action: 'profile.update', entityType: 'user', entityId: uid,
+          reason: '', metadata: { fields: ['name'] },
+        });
+        return { id: updated.id, name: updated.name };
+      });
+
+      // Demande de changement de contact : un OTP est envoyé au numéro de
+      // vérification (numéro actuel pour un email, nouveau numéro pour un phone).
+      i.post('/me/contact', async (req, reply) => {
+        const p = req.principal!;
+        const limit = checkRateLimit(`contact:${p.userId}`, { windowMs: 60_000, max: 3 });
+        if (!limit.ok) {
+          return reply.code(429).send({ error: { code: 'RATE_LIMITED', message: 'trop de demandes' } });
+        }
+        let body: ReturnType<typeof ContactChangeReq.parse>;
+        try {
+          body = ContactChangeReq.parse(req.body);
+        } catch (e) {
+          if (e instanceof ZodError) {
+            const msg = e.issues[0]?.message ?? 'données invalides';
+            return reply.code(400).send({ error: { code: 'BAD_INPUT', message: msg } });
+          }
+          throw e;
+        }
+        const user = await repo.findUserById(p.userId);
+        if (!user) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'utilisateur' } });
+
+        let verifyPhone: string;
+        if (body.email) {
+          const email = body.email.toLowerCase();
+          const existing = await repo.findUserByEmail(email);
+          if (existing && existing.id !== user.id) {
+            return reply.code(409).send({ error: { code: 'CONTACT_TAKEN', message: 'email déjà utilisé' } });
+          }
+          if (!user.phone) {
+            return reply.code(409).send({
+              error: { code: 'PHONE_REQUIRED', message: 'ajoutez un téléphone avant de modifier l’email' },
+            });
+          }
+          verifyPhone = user.phone;
+        } else {
+          const phone = body.phone!.trim();
+          const existing = await repo.findUserByPhone(phone);
+          if (existing && existing.id !== user.id) {
+            return reply.code(409).send({ error: { code: 'CONTACT_TAKEN', message: 'téléphone déjà utilisé' } });
+          }
+          verifyPhone = phone;
+        }
+
+        const code = generateOtp();
+        const change = await repo.createContactChange({
+          userId: user.id,
+          newEmail: body.email?.toLowerCase(),
+          newPhone: body.phone?.trim(),
+          verifyPhone,
+          codeHash: hashOtp(code),
+          expiresAt: new Date(Date.now() + 5 * 60_000),
+        });
+        await sendOtpSms(verifyPhone, code);
+        return reply.code(202).send({
+          challengeId: change.id,
+          sentTo: maskPhone(verifyPhone),
+          expiresAt: change.expiresAt,
+        });
+      });
+
+      i.post('/me/contact/confirm', async (req, reply) => {
+        let body: ReturnType<typeof ContactConfirmReq.parse>;
+        try {
+          body = ContactConfirmReq.parse(req.body);
+        } catch (e) {
+          if (e instanceof ZodError) {
+            const msg = e.issues[0]?.message ?? 'données invalides';
+            return reply.code(400).send({ error: { code: 'BAD_INPUT', message: msg } });
+          }
+          throw e;
+        }
+        const uid = req.principal!.userId;
+        const change = await repo.getContactChange(body.challengeId);
+        if (!change || change.userId !== uid) {
+          return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'demande inconnue' } });
+        }
+        if (change.expiresAt < new Date()) {
+          await repo.deleteContactChange(change.id);
+          return reply.code(401).send({ error: { code: 'CODE_EXPIRED', message: 'code expiré' } });
+        }
+        if (!otpMatches(body.code, change.codeHash)) {
+          return reply.code(401).send({ error: { code: 'BAD_CODE', message: 'code invalide' } });
+        }
+        const updated = await repo.updateUser(
+          uid,
+          change.newPhone
+            ? { phone: change.newPhone, phoneVerified: true }
+            : { email: change.newEmail },
+        );
+        await repo.deleteContactChange(change.id);
+        await repo.addAudit({
+          actorId: uid, action: 'contact.update', entityType: 'user', entityId: uid,
+          reason: '', metadata: { field: change.newPhone ? 'phone' : 'email' },
+        });
+        return {
+          email: updated?.email ?? null,
+          phone: updated?.phone ?? null,
+          phoneVerified: updated?.phoneVerified ?? false,
+        };
       });
 
       i.get('/me/wallet', async (req) => wallet.getWallet(req.principal!.userId));
@@ -145,33 +336,48 @@ export function buildServer(
         return { prompt };
       });
 
-      // Classement national — top 10 par points + position de l'utilisateur courant
-      i.get('/leaderboard', async (req) => {
+      // Classement par langue + dialecte (les deux obligatoires) — top 10 des
+      // points cumulés gagnés dans ce couple linguistique.
+      i.get('/leaderboard', async (req, reply) => {
         const uid = req.principal!.userId;
-        const users = await repo.listUsers();
+        const q = req.query as Record<string, string>;
+        const language = (q.lang ?? '').trim();
+        const dialect = (q.dialect ?? '').trim();
+        if (!language || !dialect) {
+          return reply.code(400).send({
+            error: { code: 'BAD_INPUT', message: 'lang et dialect sont requis' },
+          });
+        }
+        const users = (await repo.listUsers()).filter(
+          (u) =>
+            u.language != null &&
+            u.dialect != null &&
+            langMatches(u.language, language) &&
+            u.dialect.toLowerCase() === dialect.toLowerCase(),
+        );
 
-        // Calcul des points pour tous les utilisateurs en parallèle
         const entries = await Promise.all(
           users.map(async (u) => {
             const w = await wallet.getWallet(u.id);
-            return { id: u.id, name: u.name, points: w.pointsTotal, language: u.language, dialect: u.dialect };
+            return {
+              id: u.id,
+              name: u.name,
+              points: w.pointsEarned,
+              language: u.language,
+              dialect: u.dialect,
+            };
           }),
         );
 
-        // Tri décroissant
         entries.sort((a, b) => b.points - a.points);
-
         const top10 = entries.slice(0, 10).map((e, idx) => ({ rank: idx + 1, ...e }));
         const myIdx = entries.findIndex((e) => e.id === uid);
-        const myEntry = myIdx >= 0
-          ? { rank: myIdx + 1, ...entries[myIdx] }
-          : null;
-
-        return { top10, me: myEntry };
+        const me = myIdx >= 0 ? { rank: myIdx + 1, ...entries[myIdx] } : null;
+        return { language, dialect, top10, me };
       });
 
       await contributionRoutes(i, contributions, audioStore);
-      await classroomRoutes(i, repo, wallet);
+      await supportRoutes(i, support);
     },
     { prefix: '/api' },
   );
@@ -181,8 +387,8 @@ export function buildServer(
     async (i) => {
       i.get('/regions', async () => buildRegionCoverage(await repo.countClipsByRegion()));
       i.get('/languages', async () => {
-        const languages = await repo.listLanguages();
-        if (languages.length > 0) return { languages };
+        const all = await repo.listLanguages({ includeInactive: true });
+        if (all.length > 0) return { languages: all.filter((l) => l.status === 'active') };
         return {
           languages: [
             { code: 'moore', nameFr: 'Mooré', isoBcp47: 'mos' },
@@ -201,9 +407,10 @@ export function buildServer(
 
   const governance = new GovernanceService(repo);
   const adminSvc = new AdminService(repo);
-  const datasetExport = new DatasetExportService(repo);
+  const referential = new ReferentialService(repo);
+  const datasetExport = new DatasetExportService(repo, audioStore);
   app.register(
-    (i) => {
+    async (i) => {
       i.addHook('preHandler', authenticate('admin', repo));
       // Toutes les mutations admin sont gardées par le garde central can().
       const sendErr = (reply: FastifyReply, e: unknown) => {
@@ -221,6 +428,7 @@ export function buildServer(
           role: p.role,
           competence: p.competence,
           permissions: permissionsFor(p.role),
+          rbacVersion: CONFIG.rbacVersion,
         };
       });
 
@@ -231,6 +439,7 @@ export function buildServer(
           const meta = await contributions.promptMetaForClip(c);
           const votes = await repo.votesForClip(c.id);
           const contributor = await repo.findUserById(c.contributorId);
+          const conversation = await support.summaryForClip(c.id);
           disputes.push({
             id: c.id,
             durationS: c.durationS,
@@ -249,9 +458,31 @@ export function buildServer(
               validatorId: v.validatorId,
               competence: v.reviewerCompetence,
             })),
+            conversation,
           });
         }
         return { disputes };
+      });
+
+      i.get('/quality', { preHandler: requirePerm('content.moderate') }, async (req, reply) => {
+        const q = req.query as {
+          type?: 'clips' | 'transcriptions' | 'all';
+          status?: string;
+          language?: string;
+          page?: string;
+          limit?: string;
+        };
+        try {
+          return await quality.list(req.principal!, {
+            type: q.type,
+            status: q.status,
+            language: q.language,
+            page: q.page ? Number(q.page) : undefined,
+            limit: q.limit ? Number(q.limit) : undefined,
+          });
+        } catch (e) {
+          return sendErr(reply, e);
+        }
       });
 
       i.get('/quality-queue', { preHandler: requirePerm('content.moderate') }, async () => {
@@ -279,7 +510,7 @@ export function buildServer(
 
       // — Référentiel (admin) —
       i.get('/languages', { preHandler: requirePerm('reference.manage') }, async () => ({
-        languages: await repo.listLanguages(),
+        languages: await repo.listLanguages({ includeInactive: true }),
       }));
       i.post('/languages', { preHandler: requirePerm('reference.manage') }, async (req, reply) => {
         const body = (req.body ?? {}) as { code?: string; nameFr?: string; isoBcp47?: string };
@@ -300,9 +531,20 @@ export function buildServer(
           return sendErr(reply, e);
         }
       });
+      i.patch('/languages/:code', { preHandler: requirePerm('reference.manage') }, async (req, reply) => {
+        const { code } = req.params as { code: string };
+        try {
+          return await referential.updateLanguage(req.principal!, code, (req.body ?? {}) as never);
+        } catch (e) { return sendErr(reply, e); }
+      });
+      i.delete('/languages/:code', { preHandler: requirePerm('reference.manage') }, async (req, reply) => {
+        const { code } = req.params as { code: string };
+        try { return await referential.deleteLanguage(req.principal!, code); }
+        catch (e) { return sendErr(reply, e); }
+      });
       i.get('/dialects', { preHandler: requirePerm('reference.manage') }, async (req) => {
         const lang = ((req.query as Record<string, string>).lang ?? '').trim() || undefined;
-        return { dialects: await repo.listDialects(lang) };
+        return { dialects: await repo.listDialects(lang, { includeInactive: true }) };
       });
       i.post('/dialects', { preHandler: requirePerm('reference.manage') }, async (req, reply) => {
         const body = (req.body ?? {}) as {
@@ -325,9 +567,20 @@ export function buildServer(
           return reply.code(400).send({ error: { code: 'BAD_INPUT', message: String(e) } });
         }
       });
+      i.patch('/dialects/:id', { preHandler: requirePerm('reference.manage') }, async (req, reply) => {
+        const { id } = req.params as { id: string };
+        try {
+          return await referential.updateDialect(req.principal!, id, (req.body ?? {}) as never);
+        } catch (e) { return sendErr(reply, e); }
+      });
+      i.delete('/dialects/:id', { preHandler: requirePerm('reference.manage') }, async (req, reply) => {
+        const { id } = req.params as { id: string };
+        try { return await referential.deleteDialect(req.principal!, id); }
+        catch (e) { return sendErr(reply, e); }
+      });
       i.get('/prompts', { preHandler: requirePerm('reference.manage') }, async (req) => {
         const lang = ((req.query as Record<string, string>).lang ?? '').trim() || undefined;
-        return { prompts: await repo.listActivePrompts(lang) };
+        return { prompts: await repo.listPrompts(lang, { includeInactive: true }) };
       });
       i.post('/prompts', { preHandler: requirePerm('reference.manage') }, async (req, reply) => {
         const body = (req.body ?? {}) as {
@@ -352,17 +605,17 @@ export function buildServer(
       });
       i.patch('/prompts/:stableId', { preHandler: requirePerm('reference.manage') }, async (req, reply) => {
         const { stableId } = req.params as { stableId: string };
-        const body = (req.body ?? {}) as { active?: boolean };
-        if (typeof body.active !== 'boolean') {
-          return reply.code(400).send({ error: { code: 'BAD_INPUT', message: 'active boolean requis' } });
-        }
-        const prompt = await repo.setPromptActive(stableId, body.active);
-        if (!prompt && body.active) return reply.code(404).send({ error: { code: 'NOT_FOUND', message: 'prompt' } });
-        await repo.addAudit({
-          actorId: req.principal!.userId, action: 'reference.prompt.active',
-          entityType: 'prompt', entityId: stableId, reason: body.active ? 'activate' : 'deactivate',
-        });
-        return { ok: true, stableId, active: body.active };
+        try {
+          const { prompt } = await referential.updatePrompt(
+            req.principal!, stableId, (req.body ?? {}) as never,
+          );
+          return { ok: true, stableId, active: prompt.active !== false, prompt };
+        } catch (e) { return sendErr(reply, e); }
+      });
+      i.delete('/prompts/:stableId', { preHandler: requirePerm('reference.manage') }, async (req, reply) => {
+        const { stableId } = req.params as { stableId: string };
+        try { return await referential.deletePrompt(req.principal!, stableId); }
+        catch (e) { return sendErr(reply, e); }
       });
 
       // Arbitrage d'un litige — résout disputed→validated|rejected, journalisé.
@@ -395,6 +648,59 @@ export function buildServer(
       });
 
       // Journal d'audit immuable — lecture seule (admin uniquement).
+
+      // — Dataset catalogue (tout le validé, tous tiers) —
+      i.get('/dataset/catalog', { preHandler: requirePerm('export.run') }, async (req, reply) => {
+        const q = req.query as {
+          groupBy?: string;
+          language?: string;
+          dialect?: string;
+          quality?: 'A' | 'B' | 'C';
+          tier?: 'gold' | 'silver' | 'bronze';
+        };
+        if (!q.groupBy || !['language', 'dialect', 'quality', 'tier'].includes(q.groupBy)) {
+          return reply.code(400).send({ error: { code: 'BAD_INPUT', message: 'groupBy requis' } });
+        }
+        try {
+          return await datasetExport.catalog(
+            req.principal!,
+            q.groupBy as 'language' | 'dialect' | 'quality' | 'tier',
+            { language: q.language, dialect: q.dialect, quality: q.quality, tier: q.tier },
+          );
+        } catch (e) {
+          return sendErr(reply, e);
+        }
+      });
+      i.get('/dataset/catalog/download', { preHandler: requirePerm('export.run') }, async (req, reply) => {
+        const q = req.query as {
+          format?: string;
+          language?: string;
+          dialect?: string;
+          quality?: 'A' | 'B' | 'C';
+          tier?: 'gold' | 'silver' | 'bronze';
+        };
+        const filter = { language: q.language, dialect: q.dialect, quality: q.quality, tier: q.tier };
+        try {
+          if (q.format === 'jsonl') {
+            const body = await datasetExport.catalogJsonl(req.principal!, filter);
+            return reply
+              .header('content-type', 'application/x-ndjson; charset=utf-8')
+              .header('content-disposition', 'attachment; filename="sabidata-catalog.jsonl"')
+              .send(body);
+          }
+          if (q.format === 'zip') {
+            const { archive, itemCount } = await datasetExport.catalogArchive(req.principal!, filter);
+            return reply
+              .header('content-type', 'application/zip')
+              .header('content-disposition', 'attachment; filename="sabidata-catalog.zip"')
+              .header('x-item-count', String(itemCount))
+              .send(archive);
+          }
+          return reply.code(400).send({ error: { code: 'BAD_INPUT', message: 'format zip|jsonl' } });
+        } catch (e) {
+          return sendErr(reply, e);
+        }
+      });
 
       // — Dataset releases —
       i.get('/dataset/releases', { preHandler: requirePerm('export.run') }, async (req, reply) => {
@@ -454,6 +760,8 @@ export function buildServer(
         }
       });
 
+      await adminSupportRoutes(i, support);
+
       i.get('/audit-log', { preHandler: requirePerm('audit.read') }, async (req) => {
         const q = req.query as { actor?: string; entity?: string; action?: string };
         const entries = await governance.listAudit({ actorId: q.actor, entityId: q.entity, action: q.action });
@@ -471,9 +779,8 @@ export function buildServer(
           let balanceFcfa: number | null = null;
           let lastLoginAt: Date | null = null;
           if (seesWallet) {
-            const ledger = await repo.ledgerFor(u.id);
-            const points = ledger.filter((e) => e.state === 'confirmed').reduce((s, e) => s + e.delta, 0);
-            balanceFcfa = points * CONFIG.pointToFcfa;
+            const w = await wallet.getWallet(u.id);
+            balanceFcfa = w.balanceFcfa;
             const last = logins.filter((l) => l.actorId === u.id).at(-1);
             lastLoginAt = last ? last.createdAt : null;
           }
@@ -517,6 +824,16 @@ export function buildServer(
             role: (body.role ?? 'contributor') as never, password: body.password,
           });
           return reply.code(201).send(r);
+        } catch (e) { return sendErr(reply, e); }
+      });
+
+      i.post('/users/:id/password', { preHandler: requirePerm('user.manage') }, async (req, reply) => {
+        const { id } = req.params as { id: string };
+        const body = (req.body ?? {}) as { password?: string; reason?: string };
+        try {
+          return await adminSvc.resetPassword(
+            req.principal!, id, body.password ?? '', body.reason ?? '',
+          );
         } catch (e) { return sendErr(reply, e); }
       });
 

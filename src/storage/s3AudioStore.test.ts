@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Readable } from 'node:stream';
-import { PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { S3AudioStore, type S3Sender } from './s3AudioStore';
 
 // Client factice : capture les commandes envoyées, rejoue des réponses.
@@ -84,6 +84,16 @@ test('S3AudioStore.openRead — propage les autres erreurs (ex. accès refusé)'
   const client = fakeClient(async () => { throw err; });
   const store = new S3AudioStore(client, { bucket: 'b' });
   await assert.rejects(() => store.openRead('clip1.m4a'), /forbidden/);
+});
+
+test('S3AudioStore.delete — DeleteObject avec la clé préfixée', async () => {
+  const client = fakeClient(async () => ({}));
+  const store = new S3AudioStore(client, { bucket: 'b', prefix: 'clips/' });
+  await store.delete('clip1.m4a');
+  const cmd = client.sent[0];
+  assert.ok(cmd instanceof DeleteObjectCommand);
+  assert.equal(cmd.input.Bucket, 'b');
+  assert.equal(cmd.input.Key, 'clips/clip1.m4a');
 });
 
 test('S3AudioStore — rejette les segments traversal', async () => {

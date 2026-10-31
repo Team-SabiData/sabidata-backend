@@ -117,7 +117,7 @@ test('decideWithdrawal : rejet re-crédite, double décision refusée', async ()
   assert.equal(r.status, 'failed');
   const lines = await repo.ledgerFor(u.id);
   assert.equal(lines[0].reason, 'withdrawal_refund');
-  assert.equal(lines[0].delta, 200); // 1000 FCFA / 5 (pointToFcfa) = 200 pts
+  assert.equal(lines[0].delta, 6667); // 1000 FCFA / 0,15 = 6666,7 → arrondi
   await assert.rejects(svc.decideWithdrawal(admin(a.id), w.id, 'approved', 'x'), /ALREADY_DECIDED/);
 });
 
@@ -126,28 +126,27 @@ test('WalletService.requestWithdrawal : débite à la création, bout-en-bout av
   const { a, u } = await seed(repo);
   const svc = new AdminService(repo);
   const wallet = new WalletService(repo);
-  // 50 contributions validées confirmées → niveau Argent, 500 pts (2500 FCFA)
-  for (let i = 0; i < 50; i++) {
-    await repo.addLedger({ userId: u.id, delta: 10, reason: 'validate', state: 'confirmed' });
-  }
+  // 4500 pts avant OR + 8000 pts après OR → niveau OR, 8000 pts convertibles
+  await repo.addLedger({ userId: u.id, delta: 4500, reason: 'record', state: 'confirmed' });
+  await repo.addLedger({ userId: u.id, delta: 8000, reason: 'record', state: 'confirmed' });
 
   // montant sous le minimum → BAD_AMOUNT
   await assert.rejects(wallet.requestWithdrawal(u.id, 100, 'orange_money'), /BAD_AMOUNT/);
   // montant au-delà du solde retirable → INSUFFICIENT_FUNDS
   await assert.rejects(wallet.requestWithdrawal(u.id, 100000, 'orange_money'), /INSUFFICIENT_FUNDS/);
 
-  // création : débite immédiatement (1000 FCFA = 200 pts)
-  const w = await wallet.requestWithdrawal(u.id, 1000, 'orange_money');
+  // création : débite immédiatement (500 FCFA = 3333 pts)
+  const w = await wallet.requestWithdrawal(u.id, 500, 'orange_money');
   let ledger = await repo.ledgerFor(u.id);
   let confirmed = ledger.filter((e) => e.state === 'confirmed').reduce((s, e) => s + e.delta, 0);
-  assert.equal(confirmed, 300); // 500 - 200
+  assert.equal(confirmed, 9167); // 12500 - 3333
 
   // approve → solde reste débité (pas de nouvelle écriture)
   const approved = await svc.decideWithdrawal(admin(a.id), w.id, 'approved', 'virement effectué');
   assert.equal(approved.status, 'paid');
   ledger = await repo.ledgerFor(u.id);
   confirmed = ledger.filter((e) => e.state === 'confirmed').reduce((s, e) => s + e.delta, 0);
-  assert.equal(confirmed, 300);
+  assert.equal(confirmed, 9167);
 
   // second retrait, rejeté cette fois → re-crédit ramène le solde net à l'identique
   const w2 = await wallet.requestWithdrawal(u.id, 500, 'wave');
@@ -155,14 +154,14 @@ test('WalletService.requestWithdrawal : débite à la création, bout-en-bout av
   assert.equal(rejected.status, 'failed');
   ledger = await repo.ledgerFor(u.id);
   confirmed = ledger.filter((e) => e.state === 'confirmed').reduce((s, e) => s + e.delta, 0);
-  assert.equal(confirmed, 300); // débit de 100 pts puis re-crédit de 100 pts → net inchangé
+  assert.equal(confirmed, 9167); // débit de 3333 pts puis re-crédit → net inchangé
 });
 
-test('WalletService.requestWithdrawal : refuse en Bronze (< 50 contributions)', async () => {
+test('WalletService.requestWithdrawal : refuse sous le niveau OR', async () => {
   const repo = new InMemoryRepo();
   const { u } = await seed(repo);
   const wallet = new WalletService(repo);
-  // 1 seule contribution confirmée mais gros solde → Bronze, doit être bloqué
+  // 1000 pts cumulés mais sous le seuil OR → conversion bloquée
   await repo.addLedger({ userId: u.id, delta: 1000, reason: 'record', state: 'confirmed' });
   await assert.rejects(wallet.requestWithdrawal(u.id, 1000, 'orange_money'), /LEVEL_TOO_LOW/);
 });

@@ -158,7 +158,7 @@ test('GET /admin/users : un modérateur (content.read_any sans wallet.read) ne v
   const asAdmin = await app.inject({ method: 'GET', url: '/admin/users', headers: { authorization: `Bearer ${adminTk}` } });
   const adminList = (asAdmin.json() as { users: { id: string; balanceFcfa: number | null; email: string | null }[] }).users;
   const awaAsAdmin = adminList.find((u) => u.id === contributor.id)!;
-  assert.equal(awaAsAdmin.balanceFcfa, 2500);
+  assert.equal(awaAsAdmin.balanceFcfa, 0); // 500 pts = Bronze, non convertible
   assert.equal(awaAsAdmin.email, 'awa@x.bf');
 });
 
@@ -256,4 +256,63 @@ test('GET /admin/clips/:id/audio — rejoue le flux audio pour un admin', async 
     method: 'GET', url: '/admin/clips/nope/audio', headers: { authorization: `Bearer ${tk}` },
   });
   assert.equal(missing.statusCode, 404);
+});
+
+test('admin support : liste paginée, non-lus, lecture et résumé dans les litiges', async () => {
+  const repo = new InMemoryRepo();
+  await seedDevAdmin(repo);
+  const app = buildServer(repo);
+  const tk = await adminToken(app);
+  const H = { authorization: `Bearer ${tk}` };
+
+  const awa = await repo.createUser({
+    name: 'Awa Litige', role: 'contributor', competence: 0, phoneVerified: true,
+  });
+  const clip = await repo.createClip({
+    contributorId: awa.id, rarity: 0, durationS: 4, requiredCompetence: 0, status: 'disputed',
+    consent: { commercialUse: true, consentVersion: 'v1', licenseTag: 'commercial-v1', provenance: {} },
+  });
+  const conv = await repo.createConversation({ userId: awa.id, clipId: clip.id, subject: 'Litige' });
+  await repo.addChatMessage({
+    conversationId: conv.id, senderId: awa.id, senderRole: 'user', body: 'Mon audio est bon',
+  });
+
+  const list = await app.inject({
+    method: 'GET', url: '/admin/support/conversations?status=open&page=1&limit=1', headers: H,
+  });
+  assert.equal(list.statusCode, 200);
+  const body = list.json() as {
+    conversations: Array<{ id: string; userName: string; unreadForStaff: number }>;
+    page: number;
+    limit: number;
+  };
+  assert.equal(body.page, 1);
+  assert.equal(body.limit, 1);
+  assert.equal(body.conversations[0]?.id, conv.id);
+  assert.equal(body.conversations[0]?.userName, 'Awa Litige');
+  assert.equal(body.conversations[0]?.unreadForStaff, 1);
+
+  const read = await app.inject({
+    method: 'POST', url: `/admin/support/conversations/${conv.id}/read`, headers: H,
+  });
+  assert.equal(read.statusCode, 200);
+  assert.equal((read.json() as { unreadForStaff: number }).unreadForStaff, 0);
+
+  const disputes = await app.inject({ method: 'GET', url: '/admin/disputes', headers: H });
+  assert.equal(disputes.statusCode, 200);
+  const disputesBody = disputes.json() as {
+    disputes: Array<{
+      id: string;
+      conversation: { conversationId: string; unreadForStaff: number; lastMessage: { body: string } };
+    }>;
+  };
+  const dispute = disputesBody.disputes.find((d) => d.id === clip.id);
+  assert.equal(dispute?.conversation.conversationId, conv.id);
+  assert.equal(dispute?.conversation.lastMessage.body, 'Mon audio est bon');
+
+  const detail = await app.inject({
+    method: 'GET', url: `/admin/support/conversations/${conv.id}?limit=1`, headers: H,
+  });
+  assert.equal(detail.statusCode, 200);
+  assert.equal((detail.json() as { messages: unknown[] }).messages.length, 1);
 });

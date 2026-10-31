@@ -25,6 +25,11 @@ export const ClipMultipartReq = z.object({
 });
 
 export const VoteReq = z.object({ verdict: z.enum(['correct', 'problem', 'unsure']) });
+export const TranscriptionVoteReq = z.object({
+  verdict: z.enum(['correct', 'problem', 'unsure']),
+  writingSystem: z.enum(['std', 'phon']).default('std'),
+  consistency: z.number().min(0).max(1).default(0.6),
+});
 export const TranscriptionReq = z.object({
   clipId: z.string().optional(),
   archiveId: z.string().optional(),
@@ -36,4 +41,5 @@ export const TranscriptionReq = z.object({
 export type ClipReq = z.infer<typeof ClipReq>;
 export type ClipMultipartReq = z.infer<typeof ClipMultipartReq>;
 export type VoteReq = z.infer<typeof VoteReq>;
+export type TranscriptionVoteReq = z.infer<typeof TranscriptionVoteReq>;
 export type TranscriptionReq = z.infer<typeof TranscriptionReq>;

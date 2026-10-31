@@ -7,18 +7,27 @@ import { type Repo, type UserRecord } from '../ports/repo';
 import { CONFIG } from '../config';
 import { generateOtp, sendOtpSms } from '../services/sms';
 import { checkRateLimit } from '../http/rateLimit';
+import { authenticate } from '../http/guards';
+import { permissionsFor } from '../domain/roles';
 
 function publicUser(u: UserRecord) {
-  return { id: u.id, name: u.name, role: u.role, competence: u.competence };
+  return {
+    id: u.id,
+    name: u.name,
+    role: u.role,
+    competence: u.competence,
+    permissions: permissionsFor(u.role),
+  };
 }
 
 // Paire de jetons mobile : access court + refresh long (cf. CONFIG.jwt).
 function issueTokens(u: UserRecord): { access: string; refresh: string } {
+  const ver = u.tokenVersion ?? 0;
   const access = signAccess(
-    { sub: u.id, role: u.role, competence: u.competence, aud: 'mobile' },
+    { sub: u.id, role: u.role, competence: u.competence, aud: 'mobile', ver },
     CONFIG.jwt.accessTtl,
   );
-  const refresh = signRefresh(u.id, CONFIG.jwt.refreshTtl);
+  const refresh = signRefresh(u.id, CONFIG.jwt.refreshTtl, ver);
   return { access, refresh };
 }
 
@@ -157,8 +166,9 @@ export async function authRoutes(app: FastifyInstance, repo: Repo): Promise<void
       return reply.code(400).send({ error: { code: 'VALIDATION_ERROR', message: 'refresh requis' } });
     }
     let sub: string;
+    let ver: number | undefined;
     try {
-      ({ sub } = verifyRefresh(raw.refresh));
+      ({ sub, ver } = verifyRefresh(raw.refresh));
     } catch {
       return reply.code(401).send({ error: { code: 'INVALID_REFRESH', message: 'session expirée' } });
     }
@@ -166,10 +176,30 @@ export async function authRoutes(app: FastifyInstance, repo: Repo): Promise<void
     if (!user) {
       return reply.code(401).send({ error: { code: 'INVALID_REFRESH', message: 'session expirée' } });
     }
+    if ((ver ?? 0) !== (user.tokenVersion ?? 0)) {
+      return reply.code(401).send({ error: { code: 'INVALID_REFRESH', message: 'session révoquée' } });
+    }
     if ((user.status ?? 'active') !== 'active') {
       return accountDisabled(reply);
     }
     const { access, refresh } = issueTokens(user);
     return reply.send({ access, refresh });
   });
+
+  // Déconnexion : révoque tous les tokens (access + refresh) du compte.
+  // La purge des données locales (cache audio, préférences) est côté mobile.
+  app.post(
+    '/logout',
+    { preHandler: authenticate('mobile', repo) },
+    async (req) => {
+      const uid = req.principal!.userId;
+      await repo.bumpTokenVersion(uid);
+      await repo.deleteContactChangesForUser(uid);
+      await repo.addAudit({
+        actorId: uid, action: 'logout', entityType: 'user', entityId: uid,
+        reason: '', metadata: { channel: 'mobile' },
+      });
+      return { ok: true };
+    },
+  );
 }

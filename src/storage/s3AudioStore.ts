@@ -1,10 +1,10 @@
 import { type Readable } from 'node:stream';
-import { PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { type AudioStore, assertSafeSegment, mimeFromExt } from './audioStore';
 
 // Sous-ensemble de S3Client suffisant pour le store (injectable en test).
 export interface S3Sender {
-  send(cmd: PutObjectCommand | GetObjectCommand): Promise<unknown>;
+  send(cmd: PutObjectCommand | GetObjectCommand | DeleteObjectCommand): Promise<unknown>;
 }
 
 export interface S3AudioStoreOptions {
@@ -58,5 +58,13 @@ export class S3AudioStore implements AudioStore {
       throw e;
     }
     return (out.Body as Readable | undefined) ?? null;
+  }
+
+  async delete(storedPath: string): Promise<void> {
+    assertSafeSegment(storedPath);
+    await this.client.send(new DeleteObjectCommand({
+      Bucket: this.opts.bucket,
+      Key: this.key(storedPath),
+    }));
   }
 }

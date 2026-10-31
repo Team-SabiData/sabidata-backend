@@ -6,16 +6,19 @@ import {
   type Vote,
   type LedgerEntry,
   type Transcription,
+  type TranscriptionStatus,
+  type QualityTranscription,
   type LedgerState,
   type AuditEntry,
   type Withdrawal,
-  type Classroom,
   type LanguageRow,
   type DialectRow,
   type PromptRow,
   type DatasetRelease,
   type DatasetItem,
+  type ContactChange,
 } from '../domain/contribution';
+import { type ChatMessage, type Conversation, type ConversationStatus } from '../domain/support';
 
 export type UserStatus = 'active' | 'suspended' | 'banned' | 'deleted';
 
@@ -29,12 +32,12 @@ export interface UserRecord {
   passwordHash?: string;
   phoneVerified: boolean;
   totpSecret?: string;
+  tokenVersion?: number;
   status?: UserStatus; // absent = 'active'
   language?: string;
   dialect?: string;
   region?: string;
   commercialConsent?: boolean;
-  classroomId?: string; // classroom courant (nullable)
 }
 
 // Port de persistance unique. L'impl Postgres/Drizzle remplacera InMemoryRepo ;
@@ -47,12 +50,59 @@ export interface Repo {
   createUser(u: Omit<UserRecord, 'id'>): Promise<UserRecord>;
   saveOtp(phone: string, code: string, expiresAt: Date): Promise<void>;
   consumeOtp(phone: string, code: string): Promise<boolean>;
+  /** Incrémente la version de session (logout / reset mot de passe). */
+  bumpTokenVersion(id: string): Promise<number | null>;
+  createContactChange(c: Omit<ContactChange, 'id' | 'createdAt'>): Promise<ContactChange>;
+  getContactChange(id: string): Promise<ContactChange | null>;
+  deleteContactChange(id: string): Promise<void>;
+  deleteContactChangesForUser(userId: string): Promise<void>;
+
+  // — chat support —
+  createConversation(c: {
+    userId: string;
+    clipId?: string;
+    subject?: string;
+  }): Promise<Conversation>;
+  findOpenConversation(userId: string): Promise<Conversation | null>;
+  findConversationByClipId(clipId: string): Promise<Conversation | null>;
+  getConversation(id: string): Promise<Conversation | null>;
+  listConversations(filter?: {
+    status?: ConversationStatus;
+    limit?: number;
+    offset?: number;
+  }): Promise<Conversation[]>;
+  updateConversation(
+    id: string,
+    patch: {
+      status?: ConversationStatus;
+      clipId?: string | null;
+      closedAt?: Date | null;
+      lastMessageAt?: Date | null;
+      userLastReadAt?: Date | null;
+      staffLastReadAt?: Date | null;
+    },
+  ): Promise<Conversation | null>;
+  addChatMessage(m: Omit<ChatMessage, 'id' | 'createdAt'>): Promise<ChatMessage>;
+  listChatMessages(
+    conversationId: string,
+    opts?: { after?: Date; before?: Date; limit?: number },
+  ): Promise<ChatMessage[]>;
+  countChatMessagesAfter(
+    conversationId: string,
+    after: Date | undefined,
+    senderRole: ChatMessage['senderRole'],
+  ): Promise<number>;
 
   // — contribution —
   createClip(c: Omit<Clip, 'id' | 'createdAt'>): Promise<Clip>;
   findClipByClientUuid(contributorId: string, clientUuid: string): Promise<Clip | null>;
   getClip(id: string): Promise<Clip | null>;
   setClipStatus(id: string, status: ClipState, autocheck?: Record<string, unknown>): Promise<void>;
+  setClipModeration(
+    id: string,
+    patch: { rejectionCount?: number; deletedAt?: Date | null },
+  ): Promise<void>;
+  clearClipAudio(id: string): Promise<void>;
   setClipAudio(id: string, audioPath: string): Promise<void>;
   setClipMedia(
     id: string,
@@ -76,11 +126,31 @@ export interface Repo {
   countClipsByRegion(): Promise<Array<{ region: string; clips: number }>>;
 
   // — référentiel —
-  listLanguages(): Promise<LanguageRow[]>;
-  listDialects(languageCode?: string): Promise<DialectRow[]>;
+  listLanguages(opts?: { includeInactive?: boolean }): Promise<LanguageRow[]>;
+  findLanguageByCode(code: string): Promise<LanguageRow | null>;
+  updateLanguage(
+    code: string,
+    patch: { nameFr?: string; isoBcp47?: string; status?: 'active' | 'inactive' },
+  ): Promise<LanguageRow | null>;
+  countLanguageRefs(code: string): Promise<{ dialects: number; prompts: number; users: number; clips: number }>;
+  listDialects(languageCode?: string, opts?: { includeInactive?: boolean }): Promise<DialectRow[]>;
+  findDialectById(id: string): Promise<DialectRow | null>;
+  updateDialect(
+    id: string,
+    patch: { nameFr?: string; zone?: string | null; targetHours?: number; active?: boolean },
+  ): Promise<DialectRow | null>;
+  countDialectRefs(id: string): Promise<{ prompts: number; users: number; clips: number }>;
   listActivePrompts(languageCode?: string): Promise<PromptRow[]>;
+  listPrompts(
+    languageCode?: string,
+    opts?: { includeInactive?: boolean },
+  ): Promise<PromptRow[]>;
   getPromptByStableId(stableId: string): Promise<PromptRow | null>;
+  updatePrompt(stableId: string, patch: { text?: string; active?: boolean }): Promise<PromptRow | null>;
+  countPromptRefs(stableId: string): Promise<{ clips: number }>;
   listQualityQueue(): Promise<Clip[]>;
+  listQualityClips(filter?: { status?: string; language?: string }): Promise<Clip[]>;
+  listQualityTranscriptions(filter?: { status?: string; language?: string }): Promise<QualityTranscription[]>;
   createLanguage(input: { code: string; nameFr: string; isoBcp47: string }): Promise<LanguageRow>;
   createDialect(input: {
     languageCode: string; code: string; nameFr: string; zone?: string; targetHours?: number;
@@ -117,8 +187,24 @@ export interface Repo {
     userId: string,
   ): Promise<Array<{ reason: string; delta: number; state: string; createdAt: Date; refClipId?: string }>>;
 
-  createTranscription(t: Omit<Transcription, 'id' | 'tier' | 'matchesAudio'>): Promise<Transcription>;
+  createTranscription(
+    t: Omit<
+      Transcription,
+      'id' | 'tier' | 'matchesAudio' | 'status' | 'rejectionCount' | 'deletedAt'
+    >,
+  ): Promise<Transcription>;
+  getTranscription(id: string): Promise<Transcription | null>;
   setTranscriptionTier(id: string, tier: Tier, matchesAudio: boolean | null): Promise<void>;
+  setTranscriptionModeration(
+    id: string,
+    patch: {
+      tier?: Tier | null;
+      matchesAudio?: boolean | null;
+      status?: TranscriptionStatus;
+      rejectionCount?: number;
+      deletedAt?: Date | null;
+    },
+  ): Promise<void>;
   hasTranscribedClip(clipId: string, authorId: string): Promise<boolean>;
 
   // — admin —
@@ -135,20 +221,13 @@ export interface Repo {
       phone?: string | null;
       passwordHash?: string | null;
       totpSecret?: string | null;
+      phoneVerified?: boolean;
       language?: string;
       dialect?: string;
       region?: string;
       commercialConsent?: boolean;
-      classroomId?: string | null;
     },
   ): Promise<UserRecord | null>;
-
-  // — classrooms —
-  createClassroom(c: Omit<Classroom, 'id' | 'createdAt'>): Promise<Classroom>;
-  findClassroomById(id: string): Promise<Classroom | null>;
-  findClassroomByCode(code: string): Promise<Classroom | null>;
-  listClassroomMembers(classroomId: string): Promise<UserRecord[]>;
-  countClipsByClassroom(classroomId: string): Promise<number>;
 
   // — retraits —
   createWithdrawal(w: Omit<Withdrawal, 'id' | 'createdAt' | 'status'>): Promise<Withdrawal>;
@@ -166,13 +245,15 @@ export interface Repo {
 export class InMemoryRepo implements Repo {
   private users: UserRecord[] = [];
   private otps = new Map<string, { code: string; expiresAt: Date }>();
+  private contactChanges: ContactChange[] = [];
+  private conversations: Conversation[] = [];
+  private chatMessages: ChatMessage[] = [];
   private clips: Clip[] = [];
   private votes: Vote[] = [];
   private ledger: (LedgerEntry & { createdAt: Date })[] = [];
   private transcriptions: Transcription[] = [];
   private audit: AuditEntry[] = [];
   private withdrawals: Withdrawal[] = [];
-  private classrooms: Classroom[] = [];
   private languages: LanguageRow[] = [];
   private dialects: DialectRow[] = [];
   private prompts: PromptRow[] = [];
@@ -193,7 +274,12 @@ export class InMemoryRepo implements Repo {
     return this.users.find((u) => u.id === id) ?? null;
   }
   async createUser(u: Omit<UserRecord, 'id'>) {
-    const user: UserRecord = { ...u, id: this.id('u'), commercialConsent: u.commercialConsent ?? false };
+    const user: UserRecord = {
+      ...u,
+      id: this.id('u'),
+      commercialConsent: u.commercialConsent ?? false,
+      tokenVersion: u.tokenVersion ?? 0,
+    };
     this.users.push(user);
     return user;
   }
@@ -208,9 +294,128 @@ export class InMemoryRepo implements Repo {
     this.otps.delete(phone);
     return true;
   }
+  async bumpTokenVersion(id: string) {
+    const u = this.users.find((x) => x.id === id);
+    if (!u) return null;
+    u.tokenVersion = (u.tokenVersion ?? 0) + 1;
+    return u.tokenVersion;
+  }
+  async createContactChange(c: Omit<ContactChange, 'id' | 'createdAt'>) {
+    this.contactChanges = this.contactChanges.filter((x) => x.userId !== c.userId);
+    const change: ContactChange = { ...c, id: this.id('cc'), createdAt: new Date() };
+    this.contactChanges.push(change);
+    return change;
+  }
+  async getContactChange(id: string) {
+    return this.contactChanges.find((x) => x.id === id) ?? null;
+  }
+  async deleteContactChange(id: string) {
+    this.contactChanges = this.contactChanges.filter((x) => x.id !== id);
+  }
+  async deleteContactChangesForUser(userId: string) {
+    this.contactChanges = this.contactChanges.filter((x) => x.userId !== userId);
+  }
+
+  async createConversation(c: { userId: string; clipId?: string; subject?: string }) {
+    const now = new Date();
+    const conv: Conversation = {
+      id: this.id('conv'),
+      userId: c.userId,
+      clipId: c.clipId,
+      subject: c.subject,
+      status: 'open',
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.conversations.push(conv);
+    return conv;
+  }
+  async findOpenConversation(userId: string) {
+    return this.conversations.find((c) => c.userId === userId && c.status === 'open') ?? null;
+  }
+  async findConversationByClipId(clipId: string) {
+    return (
+      this.conversations
+        .filter((c) => c.clipId === clipId)
+        .sort((a, b) => {
+          if ((a.status === 'open') !== (b.status === 'open')) return a.status === 'open' ? -1 : 1;
+          return (b.lastMessageAt ?? b.updatedAt).getTime() - (a.lastMessageAt ?? a.updatedAt).getTime();
+        })[0] ?? null
+    );
+  }
+  async getConversation(id: string) {
+    return this.conversations.find((c) => c.id === id) ?? null;
+  }
+  async listConversations(filter?: { status?: ConversationStatus; limit?: number; offset?: number }) {
+    const rows = this.conversations
+      .filter((c) => !filter?.status || c.status === filter.status)
+      .sort((a, b) => (b.lastMessageAt ?? b.updatedAt).getTime() - (a.lastMessageAt ?? a.updatedAt).getTime());
+    const offset = filter?.offset ?? 0;
+    const limit = filter?.limit ?? rows.length;
+    return rows.slice(offset, offset + limit);
+  }
+  async updateConversation(
+    id: string,
+    patch: {
+      status?: ConversationStatus;
+      clipId?: string | null;
+      closedAt?: Date | null;
+      lastMessageAt?: Date | null;
+      userLastReadAt?: Date | null;
+      staffLastReadAt?: Date | null;
+    },
+  ) {
+    const c = this.conversations.find((x) => x.id === id);
+    if (!c) return null;
+    if (patch.status !== undefined) c.status = patch.status;
+    if (patch.clipId !== undefined) c.clipId = patch.clipId ?? undefined;
+    if (patch.closedAt !== undefined) c.closedAt = patch.closedAt ?? undefined;
+    if (patch.lastMessageAt !== undefined) c.lastMessageAt = patch.lastMessageAt ?? undefined;
+    if (patch.userLastReadAt !== undefined) c.userLastReadAt = patch.userLastReadAt ?? undefined;
+    if (patch.staffLastReadAt !== undefined) c.staffLastReadAt = patch.staffLastReadAt ?? undefined;
+    c.updatedAt = new Date();
+    return c;
+  }
+  async addChatMessage(m: Omit<ChatMessage, 'id' | 'createdAt'>) {
+    const msg: ChatMessage = { ...m, id: this.id('msg'), createdAt: new Date() };
+    this.chatMessages.push(msg);
+    await this.updateConversation(m.conversationId, { lastMessageAt: msg.createdAt });
+    return msg;
+  }
+  async listChatMessages(
+    conversationId: string,
+    opts?: { after?: Date; before?: Date; limit?: number },
+  ) {
+    const limit = opts?.limit ?? 50;
+    let rows = this.chatMessages
+      .filter((m) => m.conversationId === conversationId)
+      .filter((m) => !opts?.after || m.createdAt > opts.after)
+      .filter((m) => !opts?.before || m.createdAt < opts.before)
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    if (opts?.after) rows = rows.slice(0, limit);
+    else rows = rows.slice(-limit);
+    return rows;
+  }
+  async countChatMessagesAfter(
+    conversationId: string,
+    after: Date | undefined,
+    senderRole: ChatMessage['senderRole'],
+  ) {
+    return this.chatMessages.filter(
+      (m) =>
+        m.conversationId === conversationId &&
+        m.senderRole === senderRole &&
+        (!after || m.createdAt > after),
+    ).length;
+  }
 
   async createClip(c: Omit<Clip, 'id' | 'createdAt'>) {
-    const clip: Clip = { ...c, id: this.id('c'), createdAt: new Date() };
+    const clip: Clip = {
+      ...c,
+      rejectionCount: c.rejectionCount ?? 0,
+      id: this.id('c'),
+      createdAt: new Date(),
+    };
     this.clips.push(clip);
     return clip;
   }
@@ -226,6 +431,22 @@ export class InMemoryRepo implements Repo {
       c.status = status;
       if (autocheck) c.autocheck = autocheck;
     }
+  }
+  async setClipModeration(
+    id: string,
+    patch: { rejectionCount?: number; deletedAt?: Date | null },
+  ) {
+    const c = this.clips.find((x) => x.id === id);
+    if (!c) return;
+    if (patch.rejectionCount !== undefined) c.rejectionCount = patch.rejectionCount;
+    if (patch.deletedAt !== undefined) c.deletedAt = patch.deletedAt ?? undefined;
+  }
+  async clearClipAudio(id: string) {
+    const c = this.clips.find((x) => x.id === id);
+    if (!c) return;
+    c.audioPath = undefined;
+    c.audioIngestPath = undefined;
+    c.audioMasterPath = undefined;
   }
   async setClipAudio(id: string, audioPath: string) {
     const c = this.clips.find((x) => x.id === id);
@@ -270,20 +491,127 @@ export class InMemoryRepo implements Repo {
   async listPeerReview() {
     return this.clips.filter((c) => c.status === 'peer_review');
   }
-  async listLanguages() {
-    return [...this.languages];
+  async listLanguages(opts: { includeInactive?: boolean } = {}) {
+    return this.languages
+      .filter((l) => opts.includeInactive || l.status === 'active')
+      .map((l) => ({ ...l }));
   }
-  async listDialects(languageCode?: string) {
-    return this.dialects.filter((d) => (languageCode ? d.languageCode === languageCode : true));
+  async findLanguageByCode(code: string) {
+    const l = this.languages.find((x) => x.code === code);
+    return l ? { ...l } : null;
+  }
+  async updateLanguage(
+    code: string,
+    patch: { nameFr?: string; isoBcp47?: string; status?: 'active' | 'inactive' },
+  ) {
+    const l = this.languages.find((x) => x.code === code);
+    if (!l) return null;
+    if (patch.nameFr !== undefined) l.nameFr = patch.nameFr;
+    if (patch.isoBcp47 !== undefined) l.isoBcp47 = patch.isoBcp47;
+    if (patch.status !== undefined) l.status = patch.status;
+    return { ...l };
+  }
+  async countLanguageRefs(code: string) {
+    const lang = this.languages.find((l) => l.code === code);
+    if (!lang) return { dialects: 0, prompts: 0, users: 0, clips: 0 };
+    return {
+      dialects: this.dialects.filter(
+        (d) => d.languageId === lang.id && d.active !== false,
+      ).length,
+      prompts: this.prompts.filter(
+        (p) => p.languageCode === code && p.active !== false,
+      ).length,
+      users: this.users.filter((u) => u.language === code).length,
+      clips: this.clips.filter((c) => c.language === code).length,
+    };
+  }
+  async listDialects(languageCode?: string, opts: { includeInactive?: boolean } = {}) {
+    return this.dialects
+      .filter((d) => (languageCode ? d.languageCode === languageCode : true))
+      .filter((d) => opts.includeInactive || d.active !== false)
+      .map((d) => ({ ...d }));
+  }
+  async findDialectById(id: string) {
+    const d = this.dialects.find((x) => x.id === id);
+    return d ? { ...d } : null;
+  }
+  async updateDialect(
+    id: string,
+    patch: { nameFr?: string; zone?: string | null; targetHours?: number; active?: boolean },
+  ) {
+    const d = this.dialects.find((x) => x.id === id);
+    if (!d) return null;
+    if (patch.nameFr !== undefined) d.nameFr = patch.nameFr;
+    if (patch.zone !== undefined) d.zone = patch.zone ?? undefined;
+    if (patch.targetHours !== undefined) d.targetHours = patch.targetHours;
+    if (patch.active !== undefined) d.active = patch.active;
+    return { ...d };
+  }
+  async countDialectRefs(id: string) {
+    const d = this.dialects.find((x) => x.id === id);
+    if (!d) return { prompts: 0, users: 0, clips: 0 };
+    return {
+      prompts: this.prompts.filter(
+        (p) =>
+          p.active !== false &&
+          p.languageCode === d.languageCode &&
+          p.dialectCode === d.code,
+      ).length,
+      users: this.users.filter(
+        (u) => u.language === d.languageCode && u.dialect === d.code,
+      ).length,
+      clips: this.clips.filter(
+        (c) => c.language === d.languageCode && c.dialect === d.code,
+      ).length,
+    };
   }
   async listActivePrompts(languageCode?: string) {
-    return this.prompts.filter((p) => (languageCode ? p.languageCode === languageCode : true));
+    return this.prompts
+      .filter((p) => p.active !== false)
+      .filter((p) => (languageCode ? p.languageCode === languageCode : true))
+      .map((p) => ({ ...p }));
+  }
+  async listPrompts(languageCode?: string, opts: { includeInactive?: boolean } = {}) {
+    return this.prompts
+      .filter((p) => opts.includeInactive || p.active !== false)
+      .filter((p) => (languageCode ? p.languageCode === languageCode : true))
+      .map((p) => ({ ...p }));
   }
   async getPromptByStableId(stableId: string) {
-    return this.prompts.find((p) => p.stableId === stableId) ?? null;
+    const p = this.prompts.find((x) => x.stableId === stableId);
+    return p ? { ...p } : null;
+  }
+  async updatePrompt(stableId: string, patch: { text?: string; active?: boolean }) {
+    const p = this.prompts.find((x) => x.stableId === stableId);
+    if (!p) return null;
+    if (patch.text !== undefined) p.text = patch.text;
+    if (patch.active !== undefined) p.active = patch.active;
+    return { ...p };
+  }
+  async countPromptRefs(stableId: string) {
+    return { clips: this.clips.filter((c) => c.promptId === stableId).length };
   }
   async listQualityQueue() {
     return this.clips.filter((c) => c.status === 'rejected' || c.audioQuality === 'F');
+  }
+  async listQualityClips(filter: { status?: string; language?: string } = {}) {
+    return this.clips.filter(
+      (c) =>
+        (!filter.status || c.status === filter.status) &&
+        (!filter.language || c.language === filter.language),
+    );
+  }
+  async listQualityTranscriptions(
+    filter: { status?: string; language?: string } = {},
+  ): Promise<QualityTranscription[]> {
+    const out: QualityTranscription[] = [];
+    for (const t of this.transcriptions) {
+      if (filter.status && t.status !== filter.status) continue;
+      const clip = t.clipId ? this.clips.find((c) => c.id === t.clipId) : undefined;
+      if (filter.language && clip?.language !== filter.language) continue;
+      out.push({ ...t, language: clip?.language, dialect: clip?.dialect });
+    }
+    return out;
   }
   async createLanguage(input: { code: string; nameFr: string; isoBcp47: string }) {
     const row: LanguageRow = {
@@ -305,6 +633,7 @@ export class InMemoryRepo implements Repo {
       nameFr: input.nameFr,
       zone: input.zone,
       targetHours: input.targetHours ?? 0,
+      active: true,
     };
     this.dialects.push(row);
     return row;
@@ -319,15 +648,13 @@ export class InMemoryRepo implements Repo {
       dialectCode: input.dialectCode,
       text: input.text,
       writingSystem: 'std',
+      active: true,
     };
     this.prompts.push(row);
     return row;
   }
   async setPromptActive(stableId: string, active: boolean) {
-    const p = this.prompts.find((x) => x.stableId === stableId);
-    if (!p) return null;
-    if (!active) this.prompts = this.prompts.filter((x) => x.stableId !== stableId);
-    return p;
+    return this.updatePrompt(stableId, { active });
   }
   async listTranscriptionsForClip(clipId: string) {
     return this.transcriptions.filter((t) => t.clipId === clipId);
@@ -417,10 +744,25 @@ export class InMemoryRepo implements Repo {
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
   }
 
-  async createTranscription(t: Omit<Transcription, 'id' | 'tier' | 'matchesAudio'>) {
-    const tr: Transcription = { ...t, id: this.id('t'), tier: null, matchesAudio: null };
+  async createTranscription(
+    t: Omit<
+      Transcription,
+      'id' | 'tier' | 'matchesAudio' | 'status' | 'rejectionCount' | 'deletedAt'
+    >,
+  ) {
+    const tr: Transcription = {
+      ...t,
+      id: this.id('t'),
+      tier: null,
+      matchesAudio: null,
+      status: 'pending',
+      rejectionCount: 0,
+    };
     this.transcriptions.push(tr);
     return tr;
+  }
+  async getTranscription(id: string) {
+    return this.transcriptions.find((t) => t.id === id) ?? null;
   }
   async setTranscriptionTier(id: string, tier: Tier, matchesAudio: boolean | null) {
     const t = this.transcriptions.find((x) => x.id === id);
@@ -428,6 +770,24 @@ export class InMemoryRepo implements Repo {
       t.tier = tier;
       t.matchesAudio = matchesAudio;
     }
+  }
+  async setTranscriptionModeration(
+    id: string,
+    patch: {
+      tier?: Tier | null;
+      matchesAudio?: boolean | null;
+      status?: TranscriptionStatus;
+      rejectionCount?: number;
+      deletedAt?: Date | null;
+    },
+  ) {
+    const t = this.transcriptions.find((x) => x.id === id);
+    if (!t) return;
+    if (patch.tier !== undefined) t.tier = patch.tier;
+    if (patch.matchesAudio !== undefined) t.matchesAudio = patch.matchesAudio;
+    if (patch.status !== undefined) t.status = patch.status;
+    if (patch.rejectionCount !== undefined) t.rejectionCount = patch.rejectionCount;
+    if (patch.deletedAt !== undefined) t.deletedAt = patch.deletedAt ?? undefined;
   }
   async hasTranscribedClip(clipId: string, authorId: string) {
     return this.transcriptions.some((t) => t.clipId === clipId && t.authorId === authorId);
@@ -450,11 +810,11 @@ export class InMemoryRepo implements Repo {
       phone?: string | null;
       passwordHash?: string | null;
       totpSecret?: string | null;
+      phoneVerified?: boolean;
       language?: string;
       dialect?: string;
       region?: string;
       commercialConsent?: boolean;
-      classroomId?: string | null;
     },
   ) {
     const u = this.users.find((x) => x.id === id);
@@ -467,31 +827,12 @@ export class InMemoryRepo implements Repo {
     if (patch.phone !== undefined) u.phone = patch.phone ?? undefined;
     if (patch.passwordHash !== undefined) u.passwordHash = patch.passwordHash ?? undefined;
     if (patch.totpSecret !== undefined) u.totpSecret = patch.totpSecret ?? undefined;
+    if (patch.phoneVerified !== undefined) u.phoneVerified = patch.phoneVerified;
     if (patch.language !== undefined) u.language = patch.language;
     if (patch.dialect !== undefined) u.dialect = patch.dialect;
     if (patch.region !== undefined) u.region = patch.region;
     if (patch.commercialConsent !== undefined) u.commercialConsent = patch.commercialConsent;
-    if (patch.classroomId !== undefined) u.classroomId = patch.classroomId ?? undefined;
     return u;
-  }
-
-  // — classrooms —
-  async createClassroom(c: Omit<Classroom, 'id' | 'createdAt'>) {
-    const cls: Classroom = { ...c, id: this.id('cls'), createdAt: new Date() };
-    this.classrooms.push(cls);
-    return cls;
-  }
-  async findClassroomById(id: string) {
-    return this.classrooms.find((c) => c.id === id) ?? null;
-  }
-  async findClassroomByCode(code: string) {
-    return this.classrooms.find((c) => c.inviteCode === code) ?? null;
-  }
-  async listClassroomMembers(classroomId: string) {
-    return this.users.filter((u) => u.classroomId === classroomId);
-  }
-  async countClipsByClassroom(classroomId: string) {
-    return this.clips.filter((c) => c.classroomId === classroomId).length;
   }
 
   async createWithdrawal(w: Omit<Withdrawal, 'id' | 'createdAt' | 'status'>) {

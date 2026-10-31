@@ -25,6 +25,12 @@ export function authenticate(audience: 'mobile' | 'admin', repo: Repo) {
         await reply.code(401).send({ error: { code: 'INVALID_TOKEN', message: 'compte invalide ou désactivé' } });
         return;
       }
+      // Révocation globale : un logout incrémente token_version, ce qui invalide
+      // immédiatement tous les access/refresh tokens émis avant.
+      if ((c.ver ?? 0) !== (user.tokenVersion ?? 0)) {
+        await reply.code(401).send({ error: { code: 'INVALID_TOKEN', message: 'session révoquée' } });
+        return;
+      }
       // Audience admin : rôle encore élevé ?
       if (audience === 'admin' && user.role !== 'admin' && user.role !== 'moderator') {
         await reply.code(403).send({ error: { code: 'FORBIDDEN', message: 'rôle insuffisant' } });

@@ -31,7 +31,6 @@ export interface Clip {
   language?: string; // langue déclarée par le contributeur (classification BD)
   dialect?: string; // dialecte / localité
   region?: string; // zone du Burkina Faso
-  classroomId?: string; // classroom du contributeur au moment de l'envoi
   clientUuid?: string; // idempotence client (outbox)
   status: ClipState;
   consent: Consent;
@@ -46,6 +45,8 @@ export interface Clip {
   snrDb?: number;
   peakDbfs?: number;
   audioQuality?: 'A' | 'B' | 'C' | 'F';
+  rejectionCount?: number;
+  deletedAt?: Date;
   createdAt: Date;
 }
 
@@ -65,6 +66,7 @@ export interface DialectRow {
   nameFr: string;
   zone?: string;
   targetHours: number;
+  active?: boolean; // absent = actif
 }
 
 export interface PromptRow {
@@ -74,16 +76,7 @@ export interface PromptRow {
   dialectCode?: string;
   text: string;
   writingSystem: string;
-}
-
-// Groupe de collecte (école, association) rejoint par code d'invitation.
-export interface Classroom {
-  id: string;
-  name: string;
-  description: string;
-  ownerId: string;
-  inviteCode: string;
-  createdAt: Date;
+  active?: boolean; // absent = actif
 }
 
 export interface Vote {
@@ -106,6 +99,8 @@ export interface LedgerEntry {
   refTranscriptionId?: string;
 }
 
+export type TranscriptionStatus = 'pending' | 'validated' | 'rejected' | 'deleted';
+
 export interface Transcription {
   id: string;
   authorId: string;
@@ -116,6 +111,15 @@ export interface Transcription {
   consistency: number;
   matchesAudio: boolean | null;
   tier: Tier | null;
+  status?: TranscriptionStatus;
+  rejectionCount?: number;
+  deletedAt?: Date;
+}
+
+// Ligne de contrôle qualité : transcription enrichie de la langue du clip.
+export interface QualityTranscription extends Transcription {
+  language?: string;
+  dialect?: string;
 }
 
 // Journal d'audit immuable (delta-v2 §3/§6) : chaque action de gouvernance
@@ -138,6 +142,18 @@ export interface Withdrawal {
   amountFcfa: number;
   provider: string;
   status: 'processing' | 'paid' | 'failed';
+  createdAt: Date;
+}
+
+// Changement d'email/téléphone en attente de vérification OTP.
+export interface ContactChange {
+  id: string;
+  userId: string;
+  newEmail?: string;
+  newPhone?: string;
+  verifyPhone: string;
+  codeHash: string;
+  expiresAt: Date;
   createdAt: Date;
 }
 

@@ -13,6 +13,10 @@ npm test
 
 Health : `GET /health` → `{ ok: true }`.
 
+Compatibilité mobile : `GET /api/config` → `{ apiVersion, rbacVersion, minAppVersion, features }`.
+Contrat détaillé : [`API_CONTRACT.md`](./API_CONTRACT.md).
+Handoff équipes mobile/web : [`HANDOFF_INTEGRATION.md`](./HANDOFF_INTEGRATION.md).
+
 ## Production (Railway + Neon + R2)
 
 Variables requises :
@@ -26,6 +30,7 @@ Variables requises :
 | `S3_BUCKET` + `S3_ENDPOINT` + clés | Cloudflare R2 |
 | `SMS_ENABLED` | `false` si staging ; `true` avant ouverture publique |
 | `CORS_ORIGINS` | URL(s) Vercel admin, séparées par des virgules |
+| `MIN_APP_VERSION` | Version mobile minimale ; si définie, les appels `/api/*` exigent `X-App-Version` ≥ cette version |
 
 Start : `npm start` (utilise `PORT` injecté par Railway).
 
@@ -40,6 +45,9 @@ DATABASE_URL=… ADMIN_EMAIL=ops@you.bf ADMIN_PASSWORD='…' npm run bootstrap-a
 Enregistrer le secret TOTP affiché dans une app 2FA.
 
 ### Déploiement Railway
+
+Runbook complet (sauvegarde Neon, test migrations, staging, smoke tests, prod, rollback) :
+[`DEPLOY.md`](./DEPLOY.md). Prérequis de sortie du staging : [`STAGING.md`](./STAGING.md).
 
 1. Lier le repo `sabidata-backend`
 2. Configurer les variables ci-dessus

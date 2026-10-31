@@ -25,23 +25,13 @@ CREATE TABLE users (
   totp_secret     text,
   phone_verified  boolean NOT NULL DEFAULT false,
   status          text NOT NULL DEFAULT 'active',
+  token_version   integer NOT NULL DEFAULT 0,
   language           text,
   dialect            text,
   region             text,
   commercial_consent boolean NOT NULL DEFAULT false,
-  classroom_id    uuid, -- classroom courant du contributeur (nullable)
   created_at      timestamptz NOT NULL DEFAULT now(),
   updated_at      timestamptz NOT NULL DEFAULT now()
-);
-
--- Classroom : groupe de collecte (école, association) rejoint par code d'invitation.
-CREATE TABLE classrooms (
-  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  name         text NOT NULL,
-  description  text NOT NULL DEFAULT '',
-  owner_id     uuid NOT NULL REFERENCES users(id),
-  invite_code  text NOT NULL UNIQUE,
-  created_at   timestamptz NOT NULL DEFAULT now()
 );
 
 CREATE TABLE otp_codes (
@@ -49,6 +39,21 @@ CREATE TABLE otp_codes (
   code       text NOT NULL, -- SHA-256 hex du code (jamais en clair)
   expires_at timestamptz NOT NULL
 );
+
+-- Changement d'email/téléphone vérifié par OTP (table séparée pour ne pas
+-- interférer avec l'OTP de connexion).
+CREATE TABLE contact_changes (
+  id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id      uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  new_email    text,
+  new_phone    text,
+  verify_phone text NOT NULL,
+  code_hash    text NOT NULL,
+  expires_at   timestamptz NOT NULL,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  CHECK (new_email IS NOT NULL OR new_phone IS NOT NULL)
+);
+CREATE INDEX idx_contact_changes_user ON contact_changes(user_id);
 
 -- Référentiel linguistique (dataset quality)
 CREATE TABLE languages (
@@ -66,6 +71,7 @@ CREATE TABLE dialects (
   name_fr       text NOT NULL,
   zone          text,
   target_hours  numeric NOT NULL DEFAULT 0,
+  active        boolean NOT NULL DEFAULT true,
   UNIQUE (language_id, code)
 );
 
@@ -90,7 +96,6 @@ CREATE TABLE clips (
   language            text,
   dialect             text,
   region              text,
-  classroom_id        uuid, -- classroom du contributeur au moment de l'envoi
   client_uuid         uuid, -- idempotence outbox mobile
   status              clip_status NOT NULL DEFAULT 'pending',
   -- décision 4 : chaîne de consentement (immuable applicativement)
@@ -109,9 +114,12 @@ CREATE TABLE clips (
   snr_db              numeric,
   peak_dbfs           numeric,
   audio_quality       text, -- A|B|C|F
+  rejection_count     integer NOT NULL DEFAULT 0 CHECK (rejection_count >= 0),
+  deleted_at          timestamptz, -- rejet qualité : soft-delete + purge audio
   created_at          timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_clips_status ON clips(status);
+CREATE INDEX idx_clips_deleted ON clips(deleted_at) WHERE deleted_at IS NOT NULL;
 CREATE INDEX idx_clips_lang_dialect ON clips(language, dialect);
 CREATE UNIQUE INDEX idx_clips_client_uuid ON clips(contributor_id, client_uuid) WHERE client_uuid IS NOT NULL;
 
@@ -125,8 +133,14 @@ CREATE TABLE transcriptions (
   consistency    numeric NOT NULL DEFAULT 0.60,
   matches_audio  boolean,
   tier           quality_tier,
+  status         text NOT NULL DEFAULT 'pending'
+                 CHECK (status IN ('pending','validated','rejected','deleted')),
+  rejection_count integer NOT NULL DEFAULT 0 CHECK (rejection_count >= 0),
+  deleted_at     timestamptz,
   created_at     timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX idx_transcriptions_status ON transcriptions(status);
+CREATE INDEX idx_transcriptions_clip ON transcriptions(clip_id);
 
 CREATE TABLE votes (
   id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -161,6 +175,41 @@ CREATE TABLE withdrawals (
   status      text NOT NULL DEFAULT 'processing',
   created_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- Chat support : une seule conversation ouverte par utilisateur, messages
+-- textuels sans pièce jointe (polling REST côté mobile).
+CREATE TABLE conversations (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id         uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  clip_id         uuid REFERENCES clips(id),
+  subject         text,
+  status          text NOT NULL DEFAULT 'open' CHECK (status IN ('open','closed')),
+  created_at      timestamptz NOT NULL DEFAULT now(),
+  updated_at      timestamptz NOT NULL DEFAULT now(),
+  closed_at       timestamptz,
+  last_message_at timestamptz,
+  user_last_read_at  timestamptz,
+  staff_last_read_at timestamptz
+);
+CREATE UNIQUE INDEX idx_conversations_one_open
+  ON conversations(user_id) WHERE status = 'open';
+CREATE INDEX idx_conversations_status
+  ON conversations(status, last_message_at);
+
+CREATE TABLE chat_messages (
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id uuid NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  sender_id       uuid NOT NULL REFERENCES users(id),
+  sender_role     text NOT NULL CHECK (sender_role IN ('user','staff')),
+  body            text NOT NULL CHECK (char_length(btrim(body)) BETWEEN 1 AND 4000),
+  created_at      timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_chat_messages_conversation
+  ON chat_messages(conversation_id, created_at);
+CREATE INDEX idx_chat_messages_conversation_role
+  ON chat_messages(conversation_id, sender_role, created_at);
+CREATE INDEX idx_conversations_clip
+  ON conversations(clip_id) WHERE clip_id IS NOT NULL;
 
 -- Journal d'audit immuable (delta-v2 §3/§6) : trace de chaque action de
 -- gouvernance admin. Append-only — aucune route n'expose UPDATE/DELETE.

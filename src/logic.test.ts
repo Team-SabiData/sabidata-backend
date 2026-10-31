@@ -59,11 +59,10 @@ test('RBAC — contributeur ne peut pas modérer, admin peut tout', () => {
   assert.equal(can(p('admin'), 'export.run'), true); // '*'
 });
 
-test('Compétence — routage de contenu orthogonal au rôle', () => {
+test('Compétence — routage de contenu réservé aux validateurs', () => {
   assert.equal(canHandleContent(p('validator', 1), 1), true);
   assert.equal(canHandleContent(p('validator', 1), 3), false); // niveau insuffisant
-  // Validation ouverte : un contributeur valide un clip normal (compétence 0)…
-  assert.equal(canHandleContent(p('contributor', 0), 0), true);
-  // …mais le routage par compétence lui interdit les clips rares.
-  assert.equal(canHandleContent(p('contributor', 0), 2), false);
+  // Un contributeur ne valide pas, même un clip de compétence 0.
+  assert.equal(canHandleContent(p('contributor', 0), 0), false);
+  assert.equal(canHandleContent(p('contributor', 2), 0), false);
 });
