@@ -14,8 +14,6 @@ npm test
 Health : `GET /health` → `{ ok: true }`.
 
 Compatibilité mobile : `GET /api/config` → `{ apiVersion, rbacVersion, minAppVersion, features }`.
-Contrat détaillé : [`API_CONTRACT.md`](./API_CONTRACT.md).
-Handoff équipes mobile/web : [`HANDOFF_INTEGRATION.md`](./HANDOFF_INTEGRATION.md).
 
 ## Production (Railway + Neon + R2)
 
@@ -45,9 +43,6 @@ DATABASE_URL=… ADMIN_EMAIL=ops@you.bf ADMIN_PASSWORD='…' npm run bootstrap-a
 Enregistrer le secret TOTP affiché dans une app 2FA.
 
 ### Déploiement Railway
-
-Runbook complet (sauvegarde Neon, test migrations, staging, smoke tests, prod, rollback) :
-[`DEPLOY.md`](./DEPLOY.md). Prérequis de sortie du staging : [`STAGING.md`](./STAGING.md).
 
 1. Lier le repo `sabidata-backend`
 2. Configurer les variables ci-dessus
